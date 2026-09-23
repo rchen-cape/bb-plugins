@@ -1,4 +1,4 @@
-import type { ContextMode, NodeKind } from "./model.js";
+import type { ContextMode, Handoff, NodeKind } from "./model.js";
 
 export interface ContextSource {
   nodeId: string;
@@ -6,6 +6,7 @@ export interface ContextSource {
   artifactFile: string;
   summary: string;
   artifact: string;
+  handoff: Handoff;
 }
 
 export interface AssembleContextArgs {
@@ -22,7 +23,8 @@ const NO_SUMMARY = "_No summary was recorded for this task._";
 const NO_ARTIFACT = "_This task has no saved output._";
 
 function sourceSection(source: ContextSource, mode: ContextMode): string {
-  if (mode === "full_parents") {
+  // The reader asked for everything, or the writer insists on sending it.
+  if (mode === "full_parents" || source.handoff === "full") {
     const body = source.artifact.trim();
     return [
       `### Context from ${source.title} (${source.artifactFile}, full output)`,

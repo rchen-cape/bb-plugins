@@ -6,10 +6,13 @@ import type {
 import { z } from "zod";
 import {
   CONTEXT_MODES,
+  HANDOFF_MODES,
   NODE_KINDS,
   NODE_STATE_LABELS,
   contextModeSchema,
+  handoffSchema,
   nodeKindSchema,
+  type Handoff,
   type TreeNode,
   type TreeProject,
   type WorkspaceTarget,
@@ -101,10 +104,22 @@ function optionalPosition(args: ParsedArgv): { x: number; y: number } | null {
   };
 }
 
+function parseHandoff(args: ParsedArgv): Handoff | undefined {
+  const raw = args.options.get("handoff");
+  if (raw === undefined) return undefined;
+  const parsed = handoffSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new CliUsageError(
+      `--handoff must be one of ${HANDOFF_MODES.join(", ")}.`,
+    );
+  }
+  return parsed.data;
+}
+
 const USAGE = [
   "bb tree ready [--project <project>]",
   "bb tree project list|create|show|rename|delete",
-  "bb tree node list|show|create|update|move|delete",
+  "bb tree node list|show|create|update|move|delete [--handoff summary|full]",
   "bb tree dep add|remove --parent <node> --child <node>",
   "bb tree context <node>",
   "bb tree artifact read|write <node>",
@@ -495,6 +510,7 @@ export function createTreeCli(deps: TreeCliDeps) {
         (ref) => resolveNode(ref, projectRef).id,
       );
       const position = optionalPosition(args);
+      const createHandoff = parseHandoff(args);
       const node = await service.createNode({
         projectId: resolveProject(projectRef).id,
         title: requireOption(args, "title"),
@@ -503,6 +519,7 @@ export function createTreeCli(deps: TreeCliDeps) {
           ? {}
           : { instruction: requireOption(args, "instruction") }),
         ...(contextMode === undefined ? {} : { contextMode: contextMode.data }),
+        ...(createHandoff === undefined ? {} : { handoff: createHandoff }),
         ...(args.options.get("brief") === undefined
           ? {}
           : { customBrief: requireOption(args, "brief") }),
@@ -540,6 +557,7 @@ export function createTreeCli(deps: TreeCliDeps) {
             (includeRef) => resolveNode(includeRef, projectRef).id,
           )
         : undefined;
+      const updateHandoff = parseHandoff(args);
       const node = service.updateNode({
         nodeId: target.id,
         ...(args.options.get("title") === undefined
@@ -549,6 +567,7 @@ export function createTreeCli(deps: TreeCliDeps) {
           ? {}
           : { instruction: requireOption(args, "instruction") }),
         ...(contextMode === undefined ? {} : { contextMode: contextMode.data }),
+        ...(updateHandoff === undefined ? {} : { handoff: updateHandoff }),
         ...(args.options.get("brief") === undefined
           ? {}
           : { customBrief: requireOption(args, "brief") }),

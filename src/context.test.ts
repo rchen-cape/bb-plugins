@@ -8,6 +8,7 @@ function source(overrides: Partial<ContextSource> = {}): ContextSource {
     artifactFile: "01_user_research.md",
     summary: "Users need OAuth2 with Google and GitHub.",
     artifact: "# User research\n\nLong findings.",
+    handoff: "summary",
     ...overrides,
   };
 }
@@ -142,5 +143,54 @@ describe("assembleContext", () => {
       sources: [],
     });
     expect(prompt).toContain("_No instruction was written for this task yet._");
+  });
+});
+
+describe("a parent that hands over its whole document", () => {
+  /*
+   * The consumer's default is summaries, but a note whose exact wording
+   * matters has no summary worth sending, so the producer's choice wins.
+   */
+  it("sends the document even when the reader only asked for summaries", () => {
+    const prompt = assembleContext({
+      nodeTitle: "Generate the schema",
+      nodeKind: "agent",
+      artifactFile: "02_schema.md",
+      mode: "auto_compact",
+      customBrief: "",
+      instruction: "Build it.",
+      sources: [source({ handoff: "full" })],
+    });
+    expect(prompt).toContain("Long findings.");
+    expect(prompt).toContain("full output");
+    expect(prompt).not.toContain("Users need OAuth2");
+  });
+
+  it("still sends a summary for a parent that keeps to one", () => {
+    const prompt = assembleContext({
+      nodeTitle: "Generate the schema",
+      nodeKind: "agent",
+      artifactFile: "02_schema.md",
+      mode: "auto_compact",
+      customBrief: "",
+      instruction: "Build it.",
+      sources: [source({ handoff: "summary" })],
+    });
+    expect(prompt).toContain("Users need OAuth2");
+    expect(prompt).not.toContain("Long findings.");
+  });
+
+  it("carries the document into a custom brief's selection too", () => {
+    const prompt = assembleContext({
+      nodeTitle: "Generate the schema",
+      nodeKind: "agent",
+      artifactFile: "02_schema.md",
+      mode: "custom",
+      customBrief: "Only the auth decisions.",
+      instruction: "Build it.",
+      sources: [source({ handoff: "full" })],
+    });
+    expect(prompt).toContain("Only the auth decisions.");
+    expect(prompt).toContain("Long findings.");
   });
 });

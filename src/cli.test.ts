@@ -543,6 +543,41 @@ describe("bb tree", () => {
     expect(result.stderr).toContain("--workspace must be");
   });
 
+  it("sets and rejects the handoff from the command line", async () => {
+    const host = await loadPlugin(fakes);
+    await runJson(host, ["project", "create", "--name", "Auth"]);
+    const created = await runJson<{ node: TreeNode }>(host, [
+      "node",
+      "create",
+      "--project",
+      "Auth",
+      "--title",
+      "Research",
+      "--handoff",
+      "full",
+    ]);
+    expect(created.node.handoff).toBe("full");
+
+    const updated = await runJson<{ node: TreeNode }>(host, [
+      "node",
+      "update",
+      "Research",
+      "--handoff",
+      "summary",
+    ]);
+    expect(updated.node.handoff).toBe("summary");
+
+    const bad = await run(host, [
+      "node",
+      "update",
+      "Research",
+      "--handoff",
+      "everything",
+    ]);
+    expect(bad.exitCode).toBe(1);
+    expect(bad.stderr).toContain("--handoff must be one of summary, full.");
+  });
+
   it("rejects an unknown kind by listing the valid ones", async () => {
     const host = await loadPlugin(fakes);
     await runJson(host, ["project", "create", "--name", "Auth"]);

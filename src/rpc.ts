@@ -2,6 +2,7 @@ import { defineRpcContract, type PluginRpcHandlers } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
   contextModeSchema,
+  handoffSchema,
   nodeKindSchema,
   treeGraphSchema,
   treeNodeSchema,
@@ -102,6 +103,7 @@ export const treesRpcContract = defineRpcContract({
         kind: nodeKindSchema,
         instruction: z.string().optional(),
         contextMode: contextModeSchema.optional(),
+        handoff: handoffSchema.optional(),
         customBrief: z.string().optional(),
         workspace: workspaceTargetSchema.optional(),
         dependsOn: z.array(z.string().min(1)).optional(),
@@ -116,6 +118,7 @@ export const treesRpcContract = defineRpcContract({
         title: z.string().min(1).optional(),
         instruction: z.string().optional(),
         contextMode: contextModeSchema.optional(),
+        handoff: handoffSchema.optional(),
         customBrief: z.string().optional(),
         workspace: workspaceTargetSchema.optional(),
         contextIncludes: z.array(z.string().min(1)).optional(),

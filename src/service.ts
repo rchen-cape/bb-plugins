@@ -47,8 +47,10 @@ import {
 } from "./graph.js";
 import {
   CONTEXT_MODES,
+  HANDOFF_MODES,
   TREES_REALTIME_CHANNEL,
   type ContextMode,
+  type Handoff,
   type NodeKind,
   type NodeState,
   type TreeGraph,
@@ -153,6 +155,7 @@ export interface CreateNodeArgs {
   kind: NodeKind;
   instruction?: string;
   contextMode?: ContextMode;
+  handoff?: Handoff;
   customBrief?: string;
   workspace?: WorkspaceTarget;
   dependsOn?: readonly string[];
@@ -164,6 +167,7 @@ export interface UpdateNodeInput {
   title?: string;
   instruction?: string;
   contextMode?: ContextMode;
+  handoff?: Handoff;
   customBrief?: string;
   workspace?: WorkspaceTarget;
   contextIncludes?: readonly string[];
@@ -316,6 +320,7 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
       inputDigest: node.inputDigest,
       instruction: node.instruction,
       contextMode: node.contextMode,
+      handoff: node.handoff,
       customBrief: node.customBrief,
       contextIncludes: node.contextIncludes,
     };
@@ -360,6 +365,7 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
       summary: args.row.summary,
       instruction: args.row.instruction,
       contextMode: args.row.contextMode,
+      handoff: args.row.handoff,
       customBrief: args.row.customBrief,
       contextIncludes: args.row.contextIncludes,
       workspace: args.row.workspace,
@@ -698,16 +704,18 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
     for (const sourceId of sourceIds) {
       const source = rows.get(sourceId);
       if (source === undefined) continue;
-      const artifact =
-        node.contextMode === "full_parents"
-          ? (await readArtifactContent(source, project)).content
-          : "";
+      const sendsDocument =
+        node.contextMode === "full_parents" || source.handoff === "full";
+      const artifact = sendsDocument
+        ? (await readArtifactContent(source, project)).content
+        : "";
       sources.push({
         nodeId: source.id,
         title: source.title,
         artifactFile: source.artifactFile,
         summary: source.summary,
         artifact,
+        handoff: source.handoff,
       });
     }
     return {
@@ -991,6 +999,7 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
           maxLength: MAX_INSTRUCTION_LENGTH,
         }),
         contextMode: args.contextMode ?? "auto_compact",
+        handoff: args.handoff ?? "summary",
         customBrief: boundedText(args.customBrief ?? "", {
           field: "A context brief",
           maxLength: MAX_INSTRUCTION_LENGTH,
@@ -1050,6 +1059,12 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
           throw new TreeError(`Unknown context mode ${args.contextMode}.`);
         }
         update.contextMode = args.contextMode;
+      }
+      if (args.handoff !== undefined) {
+        if (!HANDOFF_MODES.includes(args.handoff)) {
+          throw new TreeError(`Unknown handoff ${args.handoff}.`);
+        }
+        update.handoff = args.handoff;
       }
       if (args.customBrief !== undefined) {
         update.customBrief = boundedText(args.customBrief, {

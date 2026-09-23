@@ -3,11 +3,13 @@ import type Database from "better-sqlite3";
 import {
   completionSchema,
   contextModeSchema,
+  handoffSchema,
   summaryStatusSchema,
   type SummaryStatus,
   nodeKindSchema,
   type Completion,
   type ContextMode,
+  type Handoff,
   type NodeKind,
   type WorkspaceTarget,
 } from "./model.js";
@@ -70,6 +72,8 @@ export const migrations = [
   `ALTER TABLE tree_nodes
      ADD COLUMN summary_status TEXT NOT NULL DEFAULT 'idle';`,
   `ALTER TABLE tree_nodes ADD COLUMN summary_problem TEXT;`,
+  `ALTER TABLE tree_nodes
+     ADD COLUMN handoff TEXT NOT NULL DEFAULT 'summary';`,
 ];
 
 export interface ProjectRow {
@@ -96,6 +100,7 @@ export interface NodeRow {
   inputDigest: string;
   instruction: string;
   contextMode: ContextMode;
+  handoff: Handoff;
   customBrief: string;
   workspace: WorkspaceTarget;
   threadId: string | null;
@@ -119,18 +124,25 @@ const NODE_COLUMNS = `id, project_id AS projectId, ordinal, title, kind,
   completion, artifact_file AS artifactFile,
   summary_status AS summaryStatus, summary_problem AS summaryProblem,
   artifact_digest AS artifactDigest, summary, input_digest AS inputDigest,
-  instruction, context_mode AS contextMode, custom_brief AS customBrief,
+  instruction, context_mode AS contextMode, handoff,
+  custom_brief AS customBrief,
   workspace_kind AS workspaceKind, workspace_ref AS workspaceRef,
   thread_id AS threadId, x, y,
   created_at AS createdAt, updated_at AS updatedAt`;
 
 interface RawNodeRow extends Omit<
   NodeRow,
-  "workspace" | "contextIncludes" | "kind" | "completion" | "contextMode"
+  | "workspace"
+  | "contextIncludes"
+  | "kind"
+  | "completion"
+  | "contextMode"
+  | "handoff"
 > {
   kind: string;
   completion: string;
   contextMode: string;
+  handoff: string;
   workspaceKind: string;
   workspaceRef: string | null;
 }
@@ -210,6 +222,7 @@ function decodeNodeRow(value: unknown, contextIncludes: string[]): NodeRow {
     inputDigest: raw.inputDigest,
     instruction: raw.instruction,
     contextMode: contextModeSchema.parse(raw.contextMode),
+    handoff: handoffSchema.parse(raw.handoff),
     customBrief: raw.customBrief,
     workspace: decodeWorkspace(raw),
     threadId: raw.threadId,
@@ -384,6 +397,7 @@ export interface InsertNodeArgs {
   artifactFile: string;
   instruction: string;
   contextMode: ContextMode;
+  handoff: Handoff;
   customBrief: string;
   workspace: WorkspaceTarget;
   x: number;
@@ -397,9 +411,10 @@ export function insertNode(db: Db, args: InsertNodeArgs): string {
   db.prepare(
     `INSERT INTO tree_nodes (
        id, project_id, ordinal, title, kind, completion, artifact_file,
-       instruction, context_mode, custom_brief, workspace_kind, workspace_ref,
+       instruction, context_mode, handoff, custom_brief,
+       workspace_kind, workspace_ref,
        x, y, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     args.projectId,
@@ -409,6 +424,7 @@ export function insertNode(db: Db, args: InsertNodeArgs): string {
     args.artifactFile,
     args.instruction,
     args.contextMode,
+    args.handoff,
     args.customBrief,
     workspace.kind,
     workspace.ref,
@@ -426,6 +442,7 @@ export interface UpdateNodeArgs {
   title?: string;
   instruction?: string;
   contextMode?: ContextMode;
+  handoff?: Handoff;
   customBrief?: string;
   workspace?: WorkspaceTarget;
   summary?: string;
@@ -449,6 +466,7 @@ export function updateNode(db: Db, args: UpdateNodeArgs): void {
   if (args.title !== undefined) set("title", args.title);
   if (args.instruction !== undefined) set("instruction", args.instruction);
   if (args.contextMode !== undefined) set("context_mode", args.contextMode);
+  if (args.handoff !== undefined) set("handoff", args.handoff);
   if (args.customBrief !== undefined) set("custom_brief", args.customBrief);
   if (args.workspace !== undefined) {
     const workspace = encodeWorkspace(args.workspace);

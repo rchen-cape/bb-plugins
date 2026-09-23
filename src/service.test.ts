@@ -963,6 +963,63 @@ describe("trees service", () => {
     expect(fakes.files.get(task.artifactPath)).toBe(`${NODE_OUTPUT}\n`);
   });
 
+  /*
+   * A note whose exact wording matters can hand over its document instead of a
+   * summary, without every task downstream having to ask for full output.
+   */
+  it("hands a note's whole document down when the note says so", async () => {
+    const { call } = await loadPlugin(fakes);
+    const project = await createProject(call, "Auth");
+    const note = await createNode(call, {
+      projectId: project.id,
+      title: "Research",
+      kind: "markdown",
+      handoff: "full",
+    });
+    const child = await createNode(call, {
+      projectId: project.id,
+      title: "Spec",
+      kind: "agent",
+      dependsOn: [note.id],
+    });
+    expect(child.contextMode).toBe("auto_compact");
+
+    fakes.files.set(note.artifactPath, "Exact wording that must survive.");
+    await call("node_complete", { nodeId: note.id, awaitSummary: true });
+
+    const preview = (await call("context_preview", {
+      nodeId: child.id,
+    })) as unknown as { prompt: string };
+    expect(preview.prompt).toContain("Exact wording that must survive.");
+    expect(preview.prompt).toContain("full output");
+  });
+
+  it("goes back to the summary when the note is switched back", async () => {
+    const { call } = await loadPlugin(fakes);
+    const project = await createProject(call, "Auth");
+    const note = await createNode(call, {
+      projectId: project.id,
+      title: "Research",
+      kind: "markdown",
+      handoff: "full",
+    });
+    const child = await createNode(call, {
+      projectId: project.id,
+      title: "Spec",
+      kind: "agent",
+      dependsOn: [note.id],
+    });
+    fakes.files.set(note.artifactPath, "Exact wording that must survive.");
+    await call("node_complete", { nodeId: note.id, awaitSummary: true });
+
+    await call("node_update", { nodeId: note.id, handoff: "summary" });
+    const preview = (await call("context_preview", {
+      nodeId: child.id,
+    })) as unknown as { prompt: string };
+    expect(preview.prompt).not.toContain("Exact wording that must survive.");
+    expect(preview.prompt).toContain("(summary)");
+  });
+
   it("stales a completed child when a parent's file changes outside bb", async () => {
     const { host, call } = await loadPlugin(fakes);
     const project = await createProject(call, "Auth");

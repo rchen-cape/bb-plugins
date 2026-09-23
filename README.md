@@ -177,6 +177,9 @@ drift from it.
 
 ## Context passed to a task
 
+Two choices meet here: what a task **receives**, and what each of its parents
+is willing to **give**.
+
 Each task chooses what it receives from upstream:
 
 - **Auto-compact** (default) — the parents' summaries only.
@@ -188,6 +191,23 @@ Each task chooses what it receives from upstream:
 With several parents, the sections are labelled per parent
 (`### Context from Write auth requirements (summary)`), so an agent can tell
 the sources apart.
+
+And each task chooses what it passes downstream, under **What it passes
+downstream** in its Setup section or with
+`bb tree node update <task> --handoff summary|full`:
+
+- **Its summary** (default) — the compacted summary, which is the point of the
+  compaction step.
+- **Its whole document** — the complete Markdown, sent to every task depending
+  on it however little that task asked for. Right for a note whose exact
+  wording matters, where a summary would lose the thing that mattered: a
+  specification, a schema, a set of copy strings. It works on an agent task's
+  output too, though that is usually what **Full parent output** is for.
+
+The producer wins: a parent set to pass its whole document sends it even to a
+child on the default auto-compact. Staleness follows the same rule — a child
+reading a parent's document is warned when that document changes, and is not
+disturbed by a rewrite of a summary it never sees.
 
 Read the assembled prompt with `bb tree context <task>`, or **Preview what it
 will see** in the panel. Nothing starts on its own: a finished parent makes its

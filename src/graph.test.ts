@@ -21,6 +21,7 @@ function node(id: string, overrides: Partial<GraphNode> = {}): GraphNode {
     inputDigest: "",
     instruction: "",
     contextMode: "auto_compact",
+    handoff: "summary",
     customBrief: "",
     contextIncludes: [],
     ...overrides,
@@ -271,6 +272,62 @@ describe("state resolution", () => {
       edges: withSummaries.edges,
     };
     expect(currentInputDigest(changedUnrelated, "b")).toBe(before);
+  });
+
+  /*
+   * Staleness is the promise that a task is told when what it read changed.
+   * A parent handing over its whole document is read through its artifact, so
+   * that is the side the digest has to hash — hashing the summary instead
+   * would leave the child reading an edit it was never warned about.
+   */
+  it("follows a parent's document when that is what it hands over", () => {
+    const graph = chain(
+      [node("a", { handoff: "full" }), node("b")],
+      [["a", "b"]],
+    );
+    const settled = settle(settle(graph, ["a"]), ["b"]);
+    expect(resolveNodeStates(settled).get("b")).toBe("completed");
+
+    const editedDocument: Graph = {
+      nodes: settled.nodes.map((candidate) =>
+        candidate.id === "a"
+          ? { ...candidate, artifactDigest: "a-artifact-v2" }
+          : candidate,
+      ),
+      edges: settled.edges,
+    };
+    expect(resolveNodeStates(editedDocument).get("b")).toBe("stale");
+  });
+
+  it("ignores a summary the child will never be sent", () => {
+    const graph = chain(
+      [node("a", { handoff: "full" }), node("b")],
+      [["a", "b"]],
+    );
+    const settled = settle(settle(graph, ["a"]), ["b"]);
+    const rewrittenSummary: Graph = {
+      nodes: settled.nodes.map((candidate) =>
+        candidate.id === "a"
+          ? { ...candidate, summary: "a completely different summary" }
+          : candidate,
+      ),
+      edges: settled.edges,
+    };
+    expect(resolveNodeStates(rewrittenSummary).get("b")).toBe("completed");
+  });
+
+  it("stales a child when its parent switches what it hands over", () => {
+    const graph = chain([node("a"), node("b")], [["a", "b"]]);
+    const settled = settle(settle(graph, ["a"]), ["b"]);
+    const switched: Graph = {
+      nodes: settled.nodes.map((candidate) =>
+        candidate.id === "a"
+          ? { ...candidate, handoff: "full" as const }
+          : candidate,
+      ),
+      edges: settled.edges,
+    };
+    expect(resolveNodeStates(switched).get("b")).toBe("stale");
   });
 
   it("does not recurse forever if stored edges contain a loop", () => {

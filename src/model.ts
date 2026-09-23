@@ -32,6 +32,16 @@ export const CONTEXT_MODES = [
 export const contextModeSchema = z.enum(CONTEXT_MODES);
 export type ContextMode = z.infer<typeof contextModeSchema>;
 
+/*
+ * What a finished task hands to the tasks that depend on it. The consumer's
+ * context mode decides what it asks for; this decides what this task is
+ * willing to give, and "full" wins over a consumer that only asked for a
+ * summary — a note whose exact wording matters has no summary worth sending.
+ */
+export const HANDOFF_MODES = ["summary", "full"] as const;
+export const handoffSchema = z.enum(HANDOFF_MODES);
+export type Handoff = z.infer<typeof handoffSchema>;
+
 export const workspaceTargetSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("tree") }).strict(),
   z
@@ -76,6 +86,7 @@ export const treeNodeSchema = z
     summaryProblem: z.string().nullable(),
     instruction: z.string(),
     contextMode: contextModeSchema,
+    handoff: handoffSchema,
     customBrief: z.string(),
     contextIncludes: z.array(z.string()),
     workspace: workspaceTargetSchema,
@@ -101,6 +112,11 @@ export const CONTEXT_MODE_LABELS: Record<ContextMode, string> = {
   auto_compact: "Auto-compact",
   full_parents: "Full parent output",
   custom: "Custom",
+};
+
+export const HANDOFF_LABELS: Record<Handoff, string> = {
+  summary: "Its summary",
+  full: "Its whole document",
 };
 
 export const NODE_STATE_LABELS: Record<NodeState, string> = {
