@@ -517,6 +517,12 @@ export function NodeDetail(props: NodeDetailProps) {
           <ThreadChat
             threadId={node.threadId}
             variant="compact"
+            /*
+             * The task owns this thread, so the chat owns its own execution
+             * controls rather than inheriting a pinned snapshot: the model and
+             * the permission mode are the user's to change from here.
+             */
+            permissionPolicy="editable"
             className="-mx-3 min-h-0 flex-1"
           />
         ) : node.kind === "agent" ? (

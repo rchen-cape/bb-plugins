@@ -766,6 +766,33 @@ describe("Trees panel", () => {
     ]);
   });
 
+  /*
+   * The task owns its thread, so its chat owns its execution controls. Left to
+   * inherit, the permission mode is pinned to a snapshot and shown as a dimmed
+   * label, which a task the user started themselves should not be.
+   */
+  it("lets the embedded chat change how the task runs", async () => {
+    const withThread = node({
+      id: "trn_11",
+      kind: "agent",
+      state: "in_progress",
+      threadId: "th_9",
+    });
+    const slot = renderSlot(
+      panel,
+      { subPath: `${project.id}/${withThread.id}` },
+      {
+        rpc: baseRpc({
+          graph_get: () => ({ project, nodes: [withThread] }),
+        }),
+      },
+    );
+
+    const chat = await slot.findByTestId("bb-thread-chat");
+    expect(chat.dataset.permissionPolicy).toBe("editable");
+    expect(chat.dataset.threadId).toBe("th_9");
+  });
+
   it("renders a completed note as read-only markdown", async () => {
     const done = node({
       id: "trn_10",
