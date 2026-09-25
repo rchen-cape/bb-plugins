@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Markdown, ThreadChat } from "@get-bb/plugin-sdk/app";
 import { Button } from "@bb/shared-ui/button";
 import { Icon } from "@bb/shared-ui/icon";
@@ -8,6 +8,7 @@ import { cn } from "@bb/shared-ui/lib/utils";
 import {
   CONTEXT_MODES,
   CONTEXT_MODE_LABELS,
+  HANDOFF_HINTS,
   HANDOFF_LABELS,
   HANDOFF_MODES,
   NODE_STATE_LABELS,
@@ -149,6 +150,58 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
         {label}
       </p>
       {children}
+    </div>
+  );
+}
+
+/*
+ * Three exclusive choices shown at once, above the box they decide the
+ * contents of. A select would hide two of the three behind a popup, and the
+ * choice is the first thing to make sense of before reading what is below it.
+ */
+function HandoffChoice({
+  handoff,
+  disabled,
+  onChange,
+}: {
+  handoff: Handoff;
+  disabled: boolean;
+  onChange: (next: Handoff) => void;
+}) {
+  const group = useId();
+  return (
+    <div
+      role="radiogroup"
+      aria-label="What it passes downstream"
+      className="flex items-center gap-0.5 rounded-md bg-muted/60 p-0.5"
+    >
+      {HANDOFF_MODES.map((candidate) => {
+        const chosen = candidate === handoff;
+        return (
+          <label
+            key={candidate}
+            className={cn(
+              "flex-1 cursor-pointer rounded px-2 py-1 text-center text-2xs font-medium transition-colors duration-150",
+              "focus-within:ring-1 focus-within:ring-ring",
+              chosen
+                ? "bg-card text-foreground shadow-xs"
+                : "text-subtle-foreground hover:text-foreground",
+              disabled ? "cursor-default opacity-60" : "",
+            )}
+          >
+            <input
+              type="radio"
+              name={group}
+              className="sr-only"
+              value={candidate}
+              checked={chosen}
+              disabled={disabled}
+              onChange={() => onChange(candidate)}
+            />
+            {HANDOFF_LABELS[candidate]}
+          </label>
+        );
+      })}
     </div>
   );
 }
@@ -360,7 +413,6 @@ export function NodeDetail(props: NodeDetailProps) {
 
   const busy = props.busyAction !== null;
   const isFinished = node.state === "completed" || node.state === "stale";
-  const summaryIsRead = node.handoff === "summary";
   const parents = node.dependsOn
     .map((parentId) =>
       props.projectNodes.find((candidate) => candidate.id === parentId),
@@ -644,31 +696,6 @@ export function NodeDetail(props: NodeDetailProps) {
             ) : null}
           </Field>
 
-          <Field label="What it passes downstream">
-            <select
-              aria-label="Handoff"
-              className={selectClass}
-              value={node.handoff}
-              onChange={(event) => {
-                const next = HANDOFF_MODES.find(
-                  (candidate) => candidate === event.target.value,
-                );
-                if (next !== undefined) props.onUpdate({ handoff: next });
-              }}
-            >
-              {HANDOFF_MODES.map((mode) => (
-                <option key={mode} value={mode}>
-                  {HANDOFF_LABELS[mode]}
-                </option>
-              ))}
-            </select>
-            <p className="text-2xs text-subtle-foreground">
-              {node.handoff === "full"
-                ? "Tasks depending on this one receive this document in full, however little context they asked for. Completing it skips the summary step."
-                : "Tasks depending on this one receive its summary unless they ask for full parent output."}
-            </p>
-          </Field>
-
           <Field label="Context it receives">
             <select
               aria-label="Context mode"
@@ -836,40 +863,58 @@ export function NodeDetail(props: NodeDetailProps) {
         </Disclosure>
 
         <Disclosure
-          key={`summary:${node.id}:${summaryIsRead && isFinished ? "open" : "closed"}`}
-          title={summaryIsRead ? "Summary passed downstream" : "Summary"}
+          key={`handoff:${node.id}:${isFinished ? "open" : "closed"}`}
+          title="What it passes downstream"
           /*
            * Borrowed from the task states, so a summary in flight reads as
            * in progress and one that did not land reads as a problem.
            */
           note={
-            !summaryIsRead ? (
-              <span className="shrink-0 text-subtle-foreground">· unused</span>
-            ) : node.summaryStatus === "pending" ? (
+            node.handoff !== "summary" ? undefined : node.summaryStatus ===
+              "pending" ? (
               <span className="shrink-0 text-warning-text">· summarizing…</span>
             ) : node.summaryStatus === "failed" ? (
               <span className="shrink-0 text-destructive-text">· failed</span>
             ) : undefined
           }
-          defaultOpen={summaryIsRead && isFinished}
+          defaultOpen={isFinished}
         >
-          {summaryIsRead ? null : (
-            <p className="text-xs text-subtle-foreground">
-              This task passes its whole document downstream, so completing it
-              writes no summary and no task would be shown one.
+          <HandoffChoice
+            handoff={node.handoff}
+            disabled={busy}
+            onChange={(next) => props.onUpdate({ handoff: next })}
+          />
+          <p className="text-2xs text-subtle-foreground">
+            {HANDOFF_HINTS[node.handoff]}
+          </p>
+          {node.handoff === "summary" &&
+          node.summaryStatus === "failed" &&
+          node.summaryProblem !== null ? (
+            <p className="text-xs text-destructive" role="alert">
+              {node.summaryProblem}
             </p>
-          )}
-          {summaryIsRead ? (
+          ) : null}
+          {node.handoff === "full" ? (
+            /*
+             * The same box, showing what will actually go down: the document
+             * itself, read-only here because the editor for it is above.
+             */
+            <Textarea
+              aria-label="Text passed downstream"
+              readOnly
+              placeholder="This task has no saved output yet."
+              className="min-h-20 resize-y bg-muted/40 text-xs"
+              value={artifactContent}
+            />
+          ) : (
             <>
-              {node.summaryStatus === "failed" &&
-              node.summaryProblem !== null ? (
-                <p className="text-xs text-destructive" role="alert">
-                  {node.summaryProblem}
-                </p>
-              ) : null}
               <Textarea
-                aria-label="Summary"
-                placeholder="Completing this task fills this in."
+                aria-label="Text passed downstream"
+                placeholder={
+                  node.handoff === "custom"
+                    ? "Write what the tasks downstream should receive."
+                    : "Completing this task fills this in."
+                }
                 className="min-h-20 resize-y text-xs"
                 value={summary}
                 onChange={(event) => setSummary(event.target.value)}
@@ -887,10 +932,12 @@ export function NodeDetail(props: NodeDetailProps) {
                   ? "Summarizing…"
                   : node.summaryStatus === "failed"
                     ? "Try again"
-                    : "Compact with AI"}
+                    : node.handoff === "custom"
+                      ? "Draft with AI"
+                      : "Compact with AI"}
               </Button>
             </>
-          ) : null}
+          )}
         </Disclosure>
       </div>
     </div>

@@ -384,7 +384,7 @@ describe("Trees panel", () => {
       const note = await slot.findByText(`· ${text}`);
       expect(note.className).toContain(tone);
 
-      const heading = slot.getByText("Summary passed downstream");
+      const heading = slot.getByText("What it passes downstream");
       expect(heading).not.toBe(note);
       expect(heading.className).not.toContain(tone);
     },
@@ -397,11 +397,11 @@ describe("Trees panel", () => {
       { rpc: baseRpc() },
     );
     await ready.findByLabelText("Task state");
-    expect(ready.queryByLabelText("Summary")).toBeNull();
+    expect(ready.queryByLabelText("Text passed downstream")).toBeNull();
     fireEvent.click(
-      ready.getByRole("button", { name: "Summary passed downstream" }),
+      ready.getByRole("button", { name: "What it passes downstream" }),
     );
-    await ready.findByLabelText("Summary");
+    await ready.findByLabelText("Text passed downstream");
     cleanup();
 
     const done = node({ id: "trn_8", state: "completed", kind: "agent" });
@@ -410,31 +410,78 @@ describe("Trees panel", () => {
       { subPath: `${project.id}/${done.id}` },
       { rpc: baseRpc({ graph_get: () => ({ project, nodes: [done] }) }) },
     );
-    await finished.findByLabelText("Summary");
+    await finished.findByLabelText("Text passed downstream");
   });
 
   /*
-   * A task that hands over its whole document is never summarized, so the
-   * box would sit empty for good and compacting it is refused by the server.
+   * The box holds what actually goes downstream, so on a full handoff it
+   * holds the document — not an empty summary nothing would ever fill.
    */
-  it("offers no summary for a task that hands over its whole document", async () => {
+  it("shows the document itself when the whole document goes downstream", async () => {
     const done = node({
       id: "trn_10",
       state: "completed",
       kind: "markdown",
       handoff: "full",
+      summary: "A compaction written back when it was auto-summarized.",
     });
     const slot = renderSlot(
       panel,
       { subPath: `${project.id}/${done.id}` },
-      { rpc: baseRpc({ graph_get: () => ({ project, nodes: [done] }) }) },
+      {
+        rpc: baseRpc({
+          graph_get: () => ({ project, nodes: [done] }),
+          artifact_read: () => ({
+            content: "# Research\n\nExact wording that must survive.",
+            sha256: "abc",
+            problem: null,
+          }),
+        }),
+      },
     );
 
-    await slot.findByText("· unused");
-    fireEvent.click(slot.getByRole("button", { name: /^Summary/ }));
-    await slot.findByText(/passes its whole document downstream/);
-    expect(slot.queryByLabelText("Summary")).toBeNull();
+    const box = (await slot.findByLabelText(
+      "Text passed downstream",
+    )) as HTMLTextAreaElement;
+    await waitFor(() => {
+      expect(box.value).toBe("# Research\n\nExact wording that must survive.");
+    });
+    expect(box.readOnly).toBe(true);
     expect(slot.queryByRole("button", { name: "Compact with AI" })).toBeNull();
+  });
+
+  it("switches what goes downstream from the box's own control", async () => {
+    const updates: unknown[] = [];
+    const done = node({
+      id: "trn_11",
+      state: "completed",
+      kind: "markdown",
+      summary: "A compaction.",
+    });
+    const slot = renderSlot(
+      panel,
+      { subPath: `${project.id}/${done.id}` },
+      {
+        rpc: baseRpc({
+          graph_get: () => ({ project, nodes: [done] }),
+          node_update: (input: never) => {
+            updates.push(input);
+            return { node: { ...done, handoff: "custom" } };
+          },
+        }),
+      },
+    );
+
+    const group = await slot.findByRole("radiogroup", {
+      name: "What it passes downstream",
+    });
+    expect(group).toBeTruthy();
+    fireEvent.click(slot.getByRole("radio", { name: "What I write" }));
+
+    await waitFor(() => {
+      expect(updates).toHaveLength(1);
+    });
+    expect(updates[0]).toMatchObject({ nodeId: done.id, handoff: "custom" });
   });
 
   it("previews the assembled context on request", async () => {

@@ -119,7 +119,7 @@ function parseHandoff(args: ParsedArgv): Handoff | undefined {
 const USAGE = [
   "bb tree ready [--project <project>]",
   "bb tree project list|create|show|rename|delete",
-  "bb tree node list|show|create|update|move|delete [--handoff summary|full]",
+  "bb tree node list|show|create|update|move|delete [--handoff summary|custom|full]",
   "bb tree dep add|remove --parent <node> --child <node>",
   "bb tree context <node>",
   "bb tree artifact read|write <node>",

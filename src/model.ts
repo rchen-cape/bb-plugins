@@ -37,8 +37,12 @@ export type ContextMode = z.infer<typeof contextModeSchema>;
  * context mode decides what it asks for; this decides what this task is
  * willing to give, and "full" wins over a consumer that only asked for a
  * summary — a note whose exact wording matters has no summary worth sending.
+ *
+ * "summary" and "custom" both send the summary field; they differ in who
+ * writes it. Completion asks a model under "summary" and leaves the field
+ * alone under "custom", so hand-written text is never overwritten.
  */
-export const HANDOFF_MODES = ["summary", "full"] as const;
+export const HANDOFF_MODES = ["summary", "custom", "full"] as const;
 export const handoffSchema = z.enum(HANDOFF_MODES);
 export type Handoff = z.infer<typeof handoffSchema>;
 
@@ -115,8 +119,17 @@ export const CONTEXT_MODE_LABELS: Record<ContextMode, string> = {
 };
 
 export const HANDOFF_LABELS: Record<Handoff, string> = {
-  summary: "Its summary",
-  full: "Its whole document",
+  summary: "Auto-summarized",
+  custom: "What I write",
+  full: "Whole document",
+};
+
+export const HANDOFF_HINTS: Record<Handoff, string> = {
+  summary:
+    "Completing this task asks a model to compact its output to under 200 words. Downstream tasks receive that.",
+  custom:
+    "Downstream tasks receive exactly the text below. Completing this task leaves it alone.",
+  full: "Downstream tasks receive the whole document, however little context they asked for. No summary is written.",
 };
 
 export const NODE_STATE_LABELS: Record<NodeState, string> = {

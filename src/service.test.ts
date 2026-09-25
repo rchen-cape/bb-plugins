@@ -1039,6 +1039,74 @@ describe("trees service", () => {
     expect(fakes.spawns.length).toBeGreaterThan(before);
   });
 
+  /*
+   * Text the user wrote is the whole point of the custom handoff, so
+   * completion must not replace it with a model's compaction.
+   */
+  it("sends the text the user wrote and leaves it alone on completion", async () => {
+    const { call } = await loadPlugin(fakes);
+    const project = await createProject(call, "Auth");
+    const note = await createNode(call, {
+      projectId: project.id,
+      title: "Research",
+      kind: "markdown",
+      handoff: "custom",
+    });
+    const child = await createNode(call, {
+      projectId: project.id,
+      title: "Spec",
+      kind: "agent",
+      dependsOn: [note.id],
+    });
+    fakes.files.set(
+      note.artifactPath,
+      "Long document nobody downstream wants.",
+    );
+    await call("node_summary_set", {
+      nodeId: note.id,
+      summary: "Use bearer tokens. Reject cookies.",
+    });
+
+    const before = fakes.spawns.length;
+    const completion = (await call("node_complete", {
+      nodeId: note.id,
+      awaitSummary: true,
+    })) as unknown as { node: TreeNode };
+
+    expect(completion.node.summary).toBe("Use bearer tokens. Reject cookies.");
+    expect(completion.node.summaryStatus).toBe("idle");
+    expect(fakes.spawns.length).toBe(before);
+
+    const preview = (await call("context_preview", {
+      nodeId: child.id,
+    })) as unknown as { prompt: string };
+    expect(preview.prompt).toContain("Use bearer tokens. Reject cookies.");
+    expect(preview.prompt).not.toContain("Long document nobody downstream");
+  });
+
+  /*
+   * Compacting is an explicit request, so on a custom handoff it drafts the
+   * text rather than being refused — what it must not do is happen by itself.
+   */
+  it("drafts the text on request for a custom handoff", async () => {
+    const { call } = await loadPlugin(fakes);
+    const project = await createProject(call, "Auth");
+    const note = await createNode(call, {
+      projectId: project.id,
+      title: "Research",
+      kind: "markdown",
+      handoff: "custom",
+    });
+    fakes.files.set(note.artifactPath, "Exact wording.");
+    await call("node_complete", { nodeId: note.id, awaitSummary: true });
+
+    await call("node_compact", { nodeId: note.id });
+    const graph = await graphOf(call, project.id);
+    expect(
+      graph.nodes.find((candidate) => candidate.id === note.id)?.summaryStatus,
+    ).toBe("pending");
+  });
+
   it("refuses to compact a task whose summary would go unread", async () => {
     const { call } = await loadPlugin(fakes);
     const project = await createProject(call, "Auth");

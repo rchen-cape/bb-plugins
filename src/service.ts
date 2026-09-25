@@ -1317,12 +1317,12 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
         now,
       });
       /*
-       * Nothing reads the summary of a task that hands over its whole
-       * document: every context path sends the document instead, and the
-       * digest hashes the document too. Asking a model to compact it would
-       * cost a call and a wait to produce text no task will ever be shown.
+       * Only an auto-summarized task is compacted on completion. A task
+       * handing over its whole document has no summary anyone reads, and one
+       * handing over text the user wrote must not have that text replaced.
+       * Both would cost a model call and a wait for nothing.
        */
-      if (node.handoff === "full") {
+      if (node.handoff !== "summary") {
         updateNodeRow(db, {
           nodeId: node.id,
           now,
@@ -1349,9 +1349,14 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
 
     compactNode(args) {
       const node = requireNode(args.nodeId);
+      /*
+       * Compacting is explicit, so it is allowed on a custom handoff: it
+       * drafts the text the user then edits. On a full handoff there is
+       * nothing to draft, because no task is shown the summary field.
+       */
       if (node.handoff === "full") {
         throw new TreeError(
-          `${node.title} hands its whole document downstream, so a summary of it would never be read. Set it to pass its summary first.`,
+          `${node.title} hands its whole document downstream, so a summary of it would never be read. Change what it passes downstream first.`,
         );
       }
       updateNodeRow(db, {

@@ -563,9 +563,9 @@ describe("bb tree", () => {
       "update",
       "Research",
       "--handoff",
-      "summary",
+      "custom",
     ]);
-    expect(updated.node.handoff).toBe("summary");
+    expect(updated.node.handoff).toBe("custom");
 
     const bad = await run(host, [
       "node",
@@ -575,7 +575,9 @@ describe("bb tree", () => {
       "everything",
     ]);
     expect(bad.exitCode).toBe(1);
-    expect(bad.stderr).toContain("--handoff must be one of summary, full.");
+    expect(bad.stderr).toContain(
+      "--handoff must be one of summary, custom, full.",
+    );
   });
 
   it("rejects an unknown kind by listing the valid ones", async () => {

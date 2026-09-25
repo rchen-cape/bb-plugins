@@ -113,7 +113,7 @@ the title line.
   the full thread view, which behaves exactly as it always did.
 - Everything you configure — dependencies, context, where it runs, thread
   operations, and deleting the task — lives in one collapsed **Setup** section,
-  with the downstream **Summary** below it.
+  with **What it passes downstream** below it.
 - An agent task has no instruction field. Opening one that has no thread yet
   asks two things: what the task should do, and which branch to work from.
   Starting it cuts a fresh worktree from that branch, opens the thread with
@@ -192,27 +192,33 @@ With several parents, the sections are labelled per parent
 (`### Context from Write auth requirements (summary)`), so an agent can tell
 the sources apart.
 
-And each task chooses what it passes downstream, under **What it passes
-downstream** in its Setup section or with
-`bb tree node update <task> --handoff summary|full`:
+And each task chooses what it passes downstream, in its **What it passes
+downstream** section or with
+`bb tree node update <task> --handoff summary|custom|full`. The box in that
+section always holds what will actually go down, and the choice above it
+decides what fills the box:
 
-- **Its summary** (default) — the compacted summary, which is the point of the
-  compaction step.
-- **Its whole document** — the complete Markdown, sent to every task depending
-  on it however little that task asked for. Right for a note whose exact
-  wording matters, where a summary would lose the thing that mattered: a
-  specification, a schema, a set of copy strings. It works on an agent task's
-  output too, though that is usually what **Full parent output** is for.
+- **Auto-summarized** (default) — completing the task asks a model to compact
+  its output to under 200 words, and writes that into the box. Edit it freely;
+  the next compaction overwrites it.
+- **What I write** — the box is yours. Completing the task leaves it alone, so
+  nothing overwrites what you wrote. _Draft with AI_ fills it from the
+  document when you want a starting point to edit.
+- **Whole document** — the complete Markdown goes down, sent to every task
+  depending on it however little that task asked for. Right for a note whose
+  exact wording matters, where a summary would lose the thing that mattered: a
+  specification, a schema, a set of copy strings. The box shows the document,
+  read-only, because its editor is the one above.
 
 The producer wins: a parent set to pass its whole document sends it even to a
 child on the default auto-compact. Staleness follows the same rule — a child
 reading a parent's document is warned when that document changes, and is not
 disturbed by a rewrite of a summary it never sees.
 
-Choosing it also skips the compaction step: nothing would read that summary, so
-completing the task writes none and does not call a model. Its Summary section
-is marked _unused_, and `bb tree compact <task>` is refused with the reason.
-Set the task back to passing its summary to get one.
+Only **Auto-summarized** calls a model on completion. The other two skip that
+step, which is the slowest part of completing a task. `bb tree compact <task>`
+still drafts text on demand under **What I write**, and is refused under
+**Whole document**, where no task is ever shown the summary field.
 
 Read the assembled prompt with `bb tree context <task>`, or **Preview what it
 will see** in the panel. Nothing starts on its own: a finished parent makes its
@@ -228,21 +234,21 @@ Completing a task does three things:
 2. Recomputes state, so the tasks that depend on it become ready.
 3. Queues a summary, and compacts it in the background. An agent task is asked
    for a summary spec in its own thread; a note is summarized by a short hidden
-   thread that is archived and stopped afterwards. A task that passes its whole
-   document downstream skips this step entirely.
+   thread that is archived and stopped afterwards. Only an auto-summarized task
+   does this; the other two handoffs skip the step entirely.
 
 Only the first two are synchronous. Marking a task done in the panel takes
-effect immediately and the summary lands a moment later — the Summary section
-reads _summarizing…_ until it does. Summarizing asks a model, which is far
-slower than anything else completion does, and nothing downstream needs it to
-become ready.
+effect immediately and the summary lands a moment later — the downstream
+section reads _summarizing…_ until it does. Summarizing asks a model, which is
+far slower than anything else completion does, and nothing downstream needs it
+to become ready.
 
 `bb tree complete <task>` waits for the summary instead, so the summary is
 ready for whatever the caller does next.
 
-If compaction fails, the task still completes and the Summary section says so —
-write the summary yourself with `bb tree summary <task> --text "…"`, or retry
-with `bb tree compact <task>`. Downstream tasks see
+If compaction fails, the task still completes and the downstream section says
+so — write the summary yourself with `bb tree summary <task> --text "…"`, or
+retry with `bb tree compact <task>`. Downstream tasks see
 `_No summary was recorded for this task._` until one exists.
 
 ## Stale tasks

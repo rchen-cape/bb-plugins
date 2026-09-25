@@ -33,25 +33,25 @@ Add `--json` to any command for machine-readable output. A task or project can
 be named by its id, and a task can also be named by its file name or its exact
 title.
 
-| Command                                                         | Purpose                                                                                                                                                                                                                     |
-| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bb tree ready [--project <tree>]`                              | Every task whose dependencies are satisfied, across all trees or in one. Start here.                                                                                                                                        |
-| `bb tree project list\|create\|show\|rename\|delete\|attach`    | Manage trees. `--bb-project <proj-id>` points the tree at the project its agent tasks get worktrees from; the tree's files stay in the Trees folder.                                                                        |
-| `bb tree node list\|show\|create\|update\|move\|delete`         | Manage the tasks in a tree. `--x`/`--y` on `create` and `move` set a task's place on the canvas; `--handoff summary\|full` sets whether it passes its summary or its whole document downstream.                             |
-| `bb tree dep add\|remove --parent <task> --child <task>`        | Wire or unwire a dependency. Loops are refused.                                                                                                                                                                             |
-| `bb tree context <task>`                                        | Print the exact context an agent task will receive.                                                                                                                                                                         |
-| `bb tree artifact read\|write <task>`                           | Read or replace a task's Markdown file.                                                                                                                                                                                     |
-| `bb tree start <task>`                                          | Spawn the agent task's thread with its assembled context.                                                                                                                                                                   |
-| `bb tree resend <task>`                                         | Send the current context into an agent task's existing thread.                                                                                                                                                              |
-| `bb tree complete <task>`                                       | Save the output, unblock the children, and compact it. Waits for the summary, unlike the panel, which returns at once and summarizes in the background. A task that passes its whole document downstream skips the summary. |
-| `bb tree compact <task>`                                        | Regenerate the summary without changing state. Refused for a task that passes its whole document downstream, which is never summarized.                                                                                     |
-| `bb tree summary <task> --text <summary>`                       | Replace the summary with text you write.                                                                                                                                                                                    |
-| `bb tree reopen <task> [--discard-thread]`                      | Move a completed task back to ready.                                                                                                                                                                                        |
-| `bb tree working <task>`                                        | Mark a task in progress without spawning a thread.                                                                                                                                                                          |
-| `bb tree project reveal <tree>`                                 | Open the tree's folder in the server machine's file manager.                                                                                                                                                                |
-| `bb tree open <task> --base-branch <branch> [--message <text>]` | Cut a worktree off that branch and open the task's thread with its first message.                                                                                                                                           |
-| `bb tree ack <task>`                                            | Keep a stale task's output and clear its warning.                                                                                                                                                                           |
-| `bb tree layout <project>`                                      | Re-lay out the canvas positions.                                                                                                                                                                                            |
+| Command                                                         | Purpose                                                                                                                                                                                                      |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bb tree ready [--project <tree>]`                              | Every task whose dependencies are satisfied, across all trees or in one. Start here.                                                                                                                         |
+| `bb tree project list\|create\|show\|rename\|delete\|attach`    | Manage trees. `--bb-project <proj-id>` points the tree at the project its agent tasks get worktrees from; the tree's files stay in the Trees folder.                                                         |
+| `bb tree node list\|show\|create\|update\|move\|delete`         | Manage the tasks in a tree. `--x`/`--y` on `create` and `move` set a task's place on the canvas; `--handoff summary\|custom\|full` sets what it passes downstream.                                           |
+| `bb tree dep add\|remove --parent <task> --child <task>`        | Wire or unwire a dependency. Loops are refused.                                                                                                                                                              |
+| `bb tree context <task>`                                        | Print the exact context an agent task will receive.                                                                                                                                                          |
+| `bb tree artifact read\|write <task>`                           | Read or replace a task's Markdown file.                                                                                                                                                                      |
+| `bb tree start <task>`                                          | Spawn the agent task's thread with its assembled context.                                                                                                                                                    |
+| `bb tree resend <task>`                                         | Send the current context into an agent task's existing thread.                                                                                                                                               |
+| `bb tree complete <task>`                                       | Save the output, unblock the children, and compact it. Waits for the summary, unlike the panel, which returns at once and summarizes in the background. Only a `summary` handoff is compacted on completion. |
+| `bb tree compact <task>`                                        | Regenerate the summary without changing state. Drafts the text under a `custom` handoff; refused under `full`, where no task reads the summary field.                                                        |
+| `bb tree summary <task> --text <summary>`                       | Replace the summary with text you write.                                                                                                                                                                     |
+| `bb tree reopen <task> [--discard-thread]`                      | Move a completed task back to ready.                                                                                                                                                                         |
+| `bb tree working <task>`                                        | Mark a task in progress without spawning a thread.                                                                                                                                                           |
+| `bb tree project reveal <tree>`                                 | Open the tree's folder in the server machine's file manager.                                                                                                                                                 |
+| `bb tree open <task> --base-branch <branch> [--message <text>]` | Cut a worktree off that branch and open the task's thread with its first message.                                                                                                                            |
+| `bb tree ack <task>`                                            | Keep a stale task's output and clear its warning.                                                                                                                                                            |
+| `bb tree layout <project>`                                      | Re-lay out the canvas positions.                                                                                                                                                                             |
 
 ## Creating a plan as a tree
 
@@ -102,6 +102,22 @@ List candidates with `bb env list` and read a task's current choice from
 
 Set the mode with `bb tree node update <task> --context-mode <mode>`, and check
 the result with `bb tree context <task>` before starting the task.
+
+## What a task passes downstream
+
+The context mode above is what a task asks for. What a task gives is its
+handoff, set with `bb tree node update <task> --handoff <mode>`:
+
+- `summary` (default) — completing the task compacts its output to under 200
+  words, and downstream tasks receive that.
+- `custom` — downstream tasks receive exactly the text in the summary field,
+  which you set with `bb tree summary <task> --text "…"`. Completion never
+  overwrites it.
+- `full` — downstream tasks receive the whole Markdown file, however little
+  they asked for, and no summary is written at all.
+
+The producer wins: a `full` parent sends its document even to a child on
+`auto_compact`. Only `summary` costs a model call on completion.
 
 ## Stale tasks
 
