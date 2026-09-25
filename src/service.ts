@@ -3,6 +3,7 @@ import { PERSONAL_PROJECT_ID } from "@bb/domain";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
+  additionalContextPrompt,
   assembleContext,
   markdownSummaryPrompt,
   summaryRequestPrompt,
@@ -37,6 +38,7 @@ import {
 } from "./data.js";
 import {
   ancestorIdsOf,
+  childIdsOf,
   currentInputDigest,
   dependencyProblem,
   layeredLayout,
@@ -184,6 +186,30 @@ export interface ContextPreview {
   sourceTitles: string[];
 }
 
+/*
+ * What became of one immediate child when its parent handed the context
+ * down. "on_start" is not a failure: an agent task with no thread yet
+ * assembles its context when it starts, so it is already going to get this.
+ */
+export const HAND_DOWN_OUTCOMES = [
+  "sent",
+  "on_start",
+  "note",
+  "failed",
+] as const;
+export type HandDownOutcome = (typeof HAND_DOWN_OUTCOMES)[number];
+
+export interface HandDownDelivery {
+  nodeId: string;
+  title: string;
+  outcome: HandDownOutcome;
+  problem: string | null;
+}
+
+export interface HandDownResult {
+  deliveries: HandDownDelivery[];
+}
+
 export interface CompletionResult {
   node: TreeNode;
   summaryProblem: string | null;
@@ -255,6 +281,7 @@ export interface TreeService {
   previewContext(args: { nodeId: string }): Promise<ContextPreview>;
   startNode(args: { nodeId: string }): Promise<TreeNode>;
   resendContext(args: { nodeId: string }): Promise<TreeNode>;
+  handDownContext(args: { nodeId: string }): Promise<HandDownResult>;
   completeNode(args: {
     nodeId: string;
     awaitSummary?: boolean;
@@ -1263,6 +1290,74 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
       touchProject(db, { projectId: node.projectId, now });
       publish(node.projectId);
       return nodeView(node.id);
+    },
+
+    /*
+     * Pushes this task's output to the tasks that depend on it, rather than
+     * waiting for each of them to pull it. One child failing does not stop
+     * the others: every child reports what became of it.
+     */
+    async handDownContext(args) {
+      const node = requireNode(args.nodeId);
+      const graph = graphOf(node.projectId);
+      const rows = new Map(
+        listNodes(db, node.projectId).map((row) => [row.id, row]),
+      );
+      const deliveries: HandDownDelivery[] = [];
+      for (const childId of childIdsOf(graph, node.id)) {
+        const child = rows.get(childId);
+        if (child === undefined) continue;
+        if (child.kind !== "agent") {
+          deliveries.push({
+            nodeId: child.id,
+            title: child.title,
+            outcome: "note",
+            problem: null,
+          });
+          continue;
+        }
+        if (child.threadId === null) {
+          deliveries.push({
+            nodeId: child.id,
+            title: child.title,
+            outcome: "on_start",
+            problem: null,
+          });
+          continue;
+        }
+        try {
+          const preview = await buildContextPreview(child);
+          await bb.sdk.threads.send({
+            threadId: child.threadId,
+            mode: "auto",
+            input: [
+              {
+                type: "text",
+                text: additionalContextPrompt({ context: preview.prompt }),
+                mentions: [],
+              },
+            ],
+          });
+          deliveries.push({
+            nodeId: child.id,
+            title: child.title,
+            outcome: "sent",
+            problem: null,
+          });
+        } catch (error) {
+          deliveries.push({
+            nodeId: child.id,
+            title: child.title,
+            outcome: "failed",
+            problem: errorText(error),
+          });
+        }
+      }
+      if (deliveries.some((delivery) => delivery.outcome === "sent")) {
+        touchProject(db, { projectId: node.projectId, now: Date.now() });
+        publish(node.projectId);
+      }
+      return { deliveries };
     },
 
     async completeNode(args) {

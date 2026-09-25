@@ -414,10 +414,10 @@ describe("Trees panel", () => {
   });
 
   /*
-   * The box holds what actually goes downstream, so on a full handoff it
-   * holds the document — not an empty summary nothing would ever fill.
+   * Nothing is shown for a whole-document handoff: what goes down is the
+   * document above, which the user just read or wrote.
    */
-  it("shows the document itself when the whole document goes downstream", async () => {
+  it("shows no box when the whole document goes downstream", async () => {
     const done = node({
       id: "trn_10",
       state: "completed",
@@ -428,26 +428,68 @@ describe("Trees panel", () => {
     const slot = renderSlot(
       panel,
       { subPath: `${project.id}/${done.id}` },
+      { rpc: baseRpc({ graph_get: () => ({ project, nodes: [done] }) }) },
+    );
+
+    await slot.findByText(/receive the whole document/);
+    expect(slot.queryByLabelText("Text passed downstream")).toBeNull();
+    expect(slot.queryByRole("button", { name: "Compact with AI" })).toBeNull();
+  });
+
+  /*
+   * The point of the button is the fan-out, so what it reports back has to
+   * distinguish a child that was messaged from one that will get this later.
+   */
+  it("sends the context down and says what each child did with it", async () => {
+    const slot = renderSlot(
+      panel,
+      { subPath: `${project.id}/${requirements.id}` },
       {
         rpc: baseRpc({
-          graph_get: () => ({ project, nodes: [done] }),
-          artifact_read: () => ({
-            content: "# Research\n\nExact wording that must survive.",
-            sha256: "abc",
-            problem: null,
+          node_hand_down: () => ({
+            deliveries: [
+              {
+                nodeId: specs.id,
+                title: specs.title,
+                outcome: "sent",
+                problem: null,
+              },
+              {
+                nodeId: "trn_x",
+                title: "Write the changelog",
+                outcome: "on_start",
+                problem: null,
+              },
+            ],
           }),
         }),
       },
     );
 
-    const box = (await slot.findByLabelText(
-      "Text passed downstream",
-    )) as HTMLTextAreaElement;
-    await waitFor(() => {
-      expect(box.value).toBe("# Research\n\nExact wording that must survive.");
-    });
-    expect(box.readOnly).toBe(true);
-    expect(slot.queryByRole("button", { name: "Compact with AI" })).toBeNull();
+    fireEvent.click(
+      await slot.findByRole("button", { name: "What it passes downstream" }),
+    );
+    fireEvent.click(
+      await slot.findByRole("button", { name: "Send down the context" }),
+    );
+
+    await slot.findByText(/Generate API design specs got it in its thread/);
+    await slot.findByText(/Write the changelog will get it when it starts/);
+  });
+
+  it("offers no hand-down on a task nothing depends on", async () => {
+    const slot = renderSlot(
+      panel,
+      { subPath: `${project.id}/${specs.id}` },
+      { rpc: baseRpc() },
+    );
+    fireEvent.click(
+      await slot.findByRole("button", { name: "What it passes downstream" }),
+    );
+    await slot.findByText("Nothing depends on this task yet.");
+    expect(
+      slot.queryByRole("button", { name: "Send down the context" }),
+    ).toBeNull();
   });
 
   it("switches what goes downstream from the box's own control", async () => {

@@ -1107,6 +1107,126 @@ describe("trees service", () => {
     ).toBe("pending");
   });
 
+  /*
+   * Handing down is a push from the parent, so it has to deal with children
+   * in every shape at once: running, not started, and notes.
+   */
+  it("hands the context down to every kind of child", async () => {
+    const { call } = await loadPlugin(fakes);
+    const project = await createProject(call, "Auth");
+    const parent = await createNode(call, {
+      projectId: project.id,
+      title: "Research",
+      kind: "markdown",
+      handoff: "custom",
+    });
+    const running = await createNode(call, {
+      projectId: project.id,
+      title: "Implement it",
+      kind: "agent",
+      instruction: "Write it.",
+      dependsOn: [parent.id],
+    });
+    const unstarted = await createNode(call, {
+      projectId: project.id,
+      title: "Test it",
+      kind: "agent",
+      instruction: "Test it.",
+      dependsOn: [parent.id],
+    });
+    const noteChild = await createNode(call, {
+      projectId: project.id,
+      title: "Write the changelog",
+      kind: "markdown",
+      dependsOn: [parent.id],
+    });
+    const grandchild = await createNode(call, {
+      projectId: project.id,
+      title: "Ship it",
+      kind: "agent",
+      instruction: "Ship it.",
+      dependsOn: [running.id],
+    });
+
+    fakes.files.set(parent.artifactPath, "The research.");
+    await call("node_summary_set", {
+      nodeId: parent.id,
+      summary: "Use bearer tokens.",
+    });
+    await call("node_complete", { nodeId: parent.id, awaitSummary: true });
+    await call("node_start", { nodeId: running.id });
+    const sentBefore = fakes.sent.length;
+
+    const { deliveries } = (await call("node_hand_down", {
+      nodeId: parent.id,
+    })) as unknown as {
+      deliveries: { nodeId: string; outcome: string }[];
+    };
+
+    expect(
+      deliveries.map((delivery) => [delivery.nodeId, delivery.outcome]),
+    ).toEqual(
+      expect.arrayContaining([
+        [running.id, "sent"],
+        [unstarted.id, "on_start"],
+        [noteChild.id, "note"],
+      ]),
+    );
+    // The grandchild is not immediate, so it is left alone.
+    expect(
+      deliveries.some((delivery) => delivery.nodeId === grandchild.id),
+    ).toBe(false);
+    expect(deliveries).toHaveLength(3);
+
+    const messages = fakes.sent.slice(sentBefore);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.text).toContain("additional context");
+    expect(messages[0]?.text).toContain("Use bearer tokens.");
+  });
+
+  it("reports the children it could not reach without giving up on the rest", async () => {
+    const { call } = await loadPlugin(fakes);
+    const project = await createProject(call, "Auth");
+    const parent = await createNode(call, {
+      projectId: project.id,
+      title: "Research",
+      kind: "markdown",
+    });
+    const broken = await createNode(call, {
+      projectId: project.id,
+      title: "Implement it",
+      kind: "agent",
+      instruction: "Write it.",
+      dependsOn: [parent.id],
+    });
+    const waiting = await createNode(call, {
+      projectId: project.id,
+      title: "Test it",
+      kind: "agent",
+      instruction: "Test it.",
+      dependsOn: [parent.id],
+    });
+    fakes.files.set(parent.artifactPath, "The research.");
+    await call("node_complete", { nodeId: parent.id, awaitSummary: true });
+    await call("node_start", { nodeId: broken.id });
+    fakes.summaryFailure = "the thread is gone";
+
+    const { deliveries } = (await call("node_hand_down", {
+      nodeId: parent.id,
+    })) as unknown as {
+      deliveries: { nodeId: string; outcome: string; problem: string | null }[];
+    };
+
+    const failure = deliveries.find(
+      (delivery) => delivery.nodeId === broken.id,
+    );
+    expect(failure?.outcome).toBe("failed");
+    expect(failure?.problem).toContain("the thread is gone");
+    expect(
+      deliveries.find((delivery) => delivery.nodeId === waiting.id)?.outcome,
+    ).toBe("on_start");
+  });
+
   it("refuses to compact a task whose summary would go unread", async () => {
     const { call } = await loadPlugin(fakes);
     const project = await createProject(call, "Auth");

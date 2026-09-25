@@ -9,7 +9,7 @@ import {
   treeProjectSchema,
   workspaceTargetSchema,
 } from "./model.js";
-import type { TreeService } from "./service.js";
+import { HAND_DOWN_OUTCOMES, type TreeService } from "./service.js";
 
 const okSchema = z.object({ ok: z.literal(true) }).strict();
 const positionSchema = z.object({
@@ -180,6 +180,23 @@ export const treesRpcContract = defineRpcContract({
     input: nodeTargetSchema,
     output: nodeResultSchema,
   },
+  node_hand_down: {
+    input: nodeTargetSchema,
+    output: z
+      .object({
+        deliveries: z.array(
+          z
+            .object({
+              nodeId: z.string(),
+              title: z.string(),
+              outcome: z.enum(HAND_DOWN_OUTCOMES),
+              problem: z.string().nullable(),
+            })
+            .strict(),
+        ),
+      })
+      .strict(),
+  },
   node_complete: {
     input: z
       .object({
@@ -301,6 +318,7 @@ export function createRpcHandlers(args: {
     node_resend: async (input) => ({
       node: await service.resendContext(input),
     }),
+    node_hand_down: (input) => service.handDownContext(input),
     node_complete: (input) => service.completeNode(input),
     node_compact: (input) => ({ node: service.compactNode(input) }),
     node_summary_set: (input) => ({ node: service.setSummary(input) }),

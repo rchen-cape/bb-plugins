@@ -496,6 +496,43 @@ describe("bb tree", () => {
     expect(result.stdout).toContain("## Deliverable");
   });
 
+  it("reports what became of each child when handing the context down", async () => {
+    const host = await loadPlugin(fakes);
+    await runJson(host, ["project", "create", "--name", "Auth"]);
+    await runJson(host, [
+      "node",
+      "create",
+      "--project",
+      "Auth",
+      "--title",
+      "Research",
+      "--kind",
+      "markdown",
+    ]);
+    await runJson(host, [
+      "node",
+      "create",
+      "--project",
+      "Auth",
+      "--title",
+      "Specs",
+      "--kind",
+      "agent",
+      "--instruction",
+      "Generate it.",
+      "--depends-on",
+      "Research",
+    ]);
+
+    const handed = await run(host, ["handdown", "Research"]);
+    expect(handed.exitCode, handed.stderr).toBe(0);
+    expect(handed.stdout).toContain("Specs has no thread yet");
+
+    const childless = await run(host, ["handdown", "Specs"]);
+    expect(childless.exitCode, childless.stderr).toBe(0);
+    expect(childless.stdout).toContain("no tasks depending on it");
+  });
+
   it("starts an agent task in a directory named on the command line", async () => {
     const host = await loadPlugin(fakes);
     await runJson(host, ["project", "create", "--name", "Auth"]);

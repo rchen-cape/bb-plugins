@@ -43,6 +43,7 @@ title.
 | `bb tree artifact read\|write <task>`                           | Read or replace a task's Markdown file.                                                                                                                                                                      |
 | `bb tree start <task>`                                          | Spawn the agent task's thread with its assembled context.                                                                                                                                                    |
 | `bb tree resend <task>`                                         | Send the current context into an agent task's existing thread.                                                                                                                                               |
+| `bb tree handdown <task>`                                       | Push this task's context to the tasks that depend on it. A child with a thread receives it as a message; one without gets it when it starts.                                                                 |
 | `bb tree complete <task>`                                       | Save the output, unblock the children, and compact it. Waits for the summary, unlike the panel, which returns at once and summarizes in the background. Only a `summary` handoff is compacted on completion. |
 | `bb tree compact <task>`                                        | Regenerate the summary without changing state. Drafts the text under a `custom` handoff; refused under `full`, where no task reads the summary field.                                                        |
 | `bb tree summary <task> --text <summary>`                       | Replace the summary with text you write.                                                                                                                                                                     |
@@ -118,6 +119,22 @@ handoff, set with `bb tree node update <task> --handoff <mode>`:
 
 The producer wins: a `full` parent sends its document even to a child on
 `auto_compact`. Only `summary` costs a model call on completion.
+
+## Handing the context down
+
+Children normally pull their context: it is assembled when each one starts.
+`bb tree handdown <task>` pushes instead, to the immediate children only:
+
+- A child with a running thread receives the context as a message in that
+  thread, framed as additional context that replaces what it was given before.
+- A child with no thread yet is reported as `on_start` — nothing to do, because
+  its first message is assembled from this task when it starts.
+- A note child is reported as `note`: it has no thread, and reads its parents
+  through the panel.
+
+One unreachable child does not stop the others; each reports its own outcome.
+Handing down does not change any child's state — use `bb tree reopen` or
+`bb tree working` for that.
 
 ## Stale tasks
 

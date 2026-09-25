@@ -198,17 +198,17 @@ downstream** section or with
 section always holds what will actually go down, and the choice above it
 decides what fills the box:
 
-- **Auto-summarized** (default) — completing the task asks a model to compact
-  its output to under 200 words, and writes that into the box. Edit it freely;
-  the next compaction overwrites it.
-- **What I write** — the box is yours. Completing the task leaves it alone, so
-  nothing overwrites what you wrote. _Draft with AI_ fills it from the
-  document when you want a starting point to edit.
-- **Whole document** — the complete Markdown goes down, sent to every task
-  depending on it however little that task asked for. Right for a note whose
-  exact wording matters, where a summary would lose the thing that mattered: a
-  specification, a schema, a set of copy strings. The box shows the document,
-  read-only, because its editor is the one above.
+- **Auto-summarized** (default) — a model compacts the output to under 200
+  words and writes it into the box, which is then yours to edit. Choosing it
+  on a finished task compacts right then rather than waiting for the next
+  completion.
+- **What I write** — the box is empty and yours to fill. Completing the task
+  leaves it alone, so nothing overwrites what you wrote. _Draft with AI_ fills
+  it from the document when you want a starting point to edit.
+- **Whole document** — nothing is shown, because what goes down is the document
+  above, which you have just read or written. Right for a note whose exact
+  wording matters, where a summary would lose the thing that mattered: a
+  specification, a schema, a set of copy strings.
 
 The producer wins: a parent set to pass its whole document sends it even to a
 child on the default auto-compact. Staleness follows the same rule — a child
@@ -223,6 +223,24 @@ still drafts text on demand under **What I write**, and is refused under
 Read the assembled prompt with `bb tree context <task>`, or **Preview what it
 will see** in the panel. Nothing starts on its own: a finished parent makes its
 children ready and stops there.
+
+## Handing the context down
+
+Children normally pull: each one assembles its context when it starts. **Send
+down the context**, at the bottom of the same section, pushes instead — to the
+immediate children, not the whole subtree — and says what became of each one:
+
+- A child **with a running thread** receives it as a message in that thread,
+  framed as additional context that replaces what it was given before. This is
+  what to use when a parent changed after its children were already working.
+- A child **not started yet** needs nothing: its first message is assembled
+  from this task when it starts, so it is reported as already accounted for.
+- A **note** child has no thread, and reads its parents in the panel.
+
+One child that cannot be reached does not stop the others; each reports its own
+outcome. Handing down never changes a child's state — that stays the state
+picker's job, so nothing starts, reopens, or completes behind your back.
+`bb tree handdown <task>` does the same from the command line.
 
 ## Completing and compacting
 

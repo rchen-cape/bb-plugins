@@ -55,6 +55,7 @@ export interface NodeDetailProps {
   branchProblem: string | null;
   artifact: ArtifactState | null;
   contextPreview: string | null;
+  handDown: readonly HandDownDelivery[] | null;
   busyAction: string | null;
   onUpdate: (patch: NodeUpdatePatch) => void;
   onSaveArtifact: (content: string) => Promise<void>;
@@ -68,6 +69,7 @@ export interface NodeDetailProps {
   onResend: () => void;
   onOpenThread: () => void;
   onCompact: () => void;
+  onHandDown: () => void;
   onDetachThread: () => void;
   onDelete: () => void;
   onClose: () => void;
@@ -202,6 +204,78 @@ function HandoffChoice({
           </label>
         );
       })}
+    </div>
+  );
+}
+
+export interface HandDownDelivery {
+  nodeId: string;
+  title: string;
+  outcome: "sent" | "on_start" | "note" | "failed";
+  problem: string | null;
+}
+
+const DELIVERY_TEXT: Record<HandDownDelivery["outcome"], string> = {
+  sent: "got it in its thread",
+  on_start: "will get it when it starts",
+  note: "is a note, and reads this itself",
+  failed: "could not be reached",
+};
+
+/*
+ * Pushing the context down, rather than each child pulling it when it starts.
+ * A child that has not started yet is not skipped work — its first message is
+ * assembled from this task, so it is already going to receive it — so it is
+ * reported alongside the ones that were messaged, not as a failure.
+ */
+function HandDown({
+  childCount,
+  deliveries,
+  busy,
+  onHandDown,
+}: {
+  childCount: number;
+  deliveries: readonly HandDownDelivery[] | null;
+  busy: boolean;
+  onHandDown: () => void;
+}) {
+  if (childCount === 0) {
+    return (
+      <p className="text-2xs text-subtle-foreground">
+        Nothing depends on this task yet.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-1.5 border-t border-border/60 pt-2">
+      <Button size="sm" variant="outline" disabled={busy} onClick={onHandDown}>
+        Send down the context
+      </Button>
+      <p className="text-2xs text-subtle-foreground">
+        {childCount === 1
+          ? "Sends it to the one task that depends on this."
+          : `Sends it to the ${childCount} tasks that depend on this.`}
+      </p>
+      {deliveries === null ? null : (
+        <ul className="space-y-0.5">
+          {deliveries.map((delivery) => (
+            <li
+              key={delivery.nodeId}
+              className={cn(
+                "text-2xs",
+                delivery.outcome === "failed"
+                  ? "text-destructive-text"
+                  : delivery.outcome === "sent"
+                    ? "text-success-text"
+                    : "text-subtle-foreground",
+              )}
+            >
+              {delivery.title} {DELIVERY_TEXT[delivery.outcome]}
+              {delivery.problem === null ? "." : `: ${delivery.problem}`}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -427,6 +501,9 @@ export function NodeDetail(props: NodeDetailProps) {
     upstreamIds.has(candidate.id),
   );
   const artifactContent = artifactDraft ?? props.artifact?.content ?? "";
+  const childTitles = props.projectNodes
+    .filter((candidate) => candidate.dependsOn.includes(node.id))
+    .map((candidate) => candidate.title);
   const isReadOnlyDocument = node.kind === "markdown" && isFinished;
 
   /*
@@ -882,7 +959,16 @@ export function NodeDetail(props: NodeDetailProps) {
           <HandoffChoice
             handoff={node.handoff}
             disabled={busy}
-            onChange={(next) => props.onUpdate({ handoff: next })}
+            onChange={(next) => {
+              props.onUpdate({ handoff: next });
+              /*
+               * Choosing to compact is a request for the compaction, not a
+               * note to act on later. There is only something to compact once
+               * the work is saved, so an unfinished task waits for completion.
+               */
+              if (next === "summary" && node.summary.length === 0 && isFinished)
+                props.onCompact();
+            }}
           />
           <p className="text-2xs text-subtle-foreground">
             {HANDOFF_HINTS[node.handoff]}
@@ -894,26 +980,21 @@ export function NodeDetail(props: NodeDetailProps) {
               {node.summaryProblem}
             </p>
           ) : null}
-          {node.handoff === "full" ? (
-            /*
-             * The same box, showing what will actually go down: the document
-             * itself, read-only here because the editor for it is above.
-             */
-            <Textarea
-              aria-label="Text passed downstream"
-              readOnly
-              placeholder="This task has no saved output yet."
-              className="min-h-20 resize-y bg-muted/40 text-xs"
-              value={artifactContent}
-            />
-          ) : (
+          {/*
+           * Nothing to show for the whole document: it is the document above,
+           * which the user just read or wrote. The other two are the text that
+           * goes down, so the box holds it and is theirs to edit.
+           */}
+          {node.handoff === "full" ? null : (
             <>
               <Textarea
                 aria-label="Text passed downstream"
                 placeholder={
                   node.handoff === "custom"
                     ? "Write what the tasks downstream should receive."
-                    : "Completing this task fills this in."
+                    : node.summaryStatus === "pending"
+                      ? "Compacting…"
+                      : "Completing this task fills this in."
                 }
                 className="min-h-20 resize-y text-xs"
                 value={summary}
@@ -929,7 +1010,7 @@ export function NodeDetail(props: NodeDetailProps) {
                 onClick={props.onCompact}
               >
                 {node.summaryStatus === "pending"
-                  ? "Summarizing…"
+                  ? "Compacting…"
                   : node.summaryStatus === "failed"
                     ? "Try again"
                     : node.handoff === "custom"
@@ -938,6 +1019,12 @@ export function NodeDetail(props: NodeDetailProps) {
               </Button>
             </>
           )}
+          <HandDown
+            childCount={childTitles.length}
+            deliveries={props.handDown}
+            busy={busy}
+            onHandDown={props.onHandDown}
+          />
         </Disclosure>
       </div>
     </div>

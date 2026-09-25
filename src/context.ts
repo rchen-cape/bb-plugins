@@ -85,6 +85,19 @@ export function assembleContext(args: AssembleContextArgs): string {
   return `${blocks.join("\n\n")}\n`;
 }
 
+/*
+ * A thread that is already running has read its context once. This arrives in
+ * the middle of that conversation, so it says what it is before it says it,
+ * and says which of the two the agent should believe.
+ */
+export function additionalContextPrompt(args: { context: string }): string {
+  return [
+    "Here is additional context to help you ground your answer. It comes from the tasks this one depends on, and replaces the context you were given earlier.",
+    "",
+    args.context,
+  ].join("\n");
+}
+
 export const SUMMARY_WORD_LIMIT = 200;
 
 export function summaryRequestPrompt(args: { title: string }): string {

@@ -29,6 +29,7 @@ import type { NodeDraft } from "./views/node-draft-card";
 import {
   NodeDetail,
   type ArtifactState,
+  type HandDownDelivery,
   type NodeUpdatePatch,
 } from "./views/node-detail";
 import { ReadyList, type ReadyEntryView } from "./views/ready-list";
@@ -453,6 +454,7 @@ function TreesPanel({ subPath }: PluginNavPanelProps) {
    */
   const artifactShaRef = useRef<string | null>(null);
   const [contextPreview, setContextPreview] = useState<string | null>(null);
+  const [handDown, setHandDown] = useState<HandDownDelivery[] | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(
     route.nodeId,
   );
@@ -548,6 +550,7 @@ function TreesPanel({ subPath }: PluginNavPanelProps) {
 
   useEffect(() => {
     setContextPreview(null);
+    setHandDown(null);
   }, [selectedNodeId]);
 
   const openedProjectRef = useRef(route.projectId);
@@ -915,6 +918,16 @@ function TreesPanel({ subPath }: PluginNavPanelProps) {
               onCompact={() =>
                 perform("compact", async () => {
                   await rpc.call("node_compact", { nodeId: selectedNode.id });
+                  graphQuery.reload();
+                })
+              }
+              handDown={handDown}
+              onHandDown={() =>
+                perform("handdown", async () => {
+                  const result = await rpc.call("node_hand_down", {
+                    nodeId: selectedNode.id,
+                  });
+                  setHandDown(result.deliveries);
                   graphQuery.reload();
                 })
               }

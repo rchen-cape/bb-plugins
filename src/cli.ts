@@ -17,7 +17,11 @@ import {
   type TreeProject,
   type WorkspaceTarget,
 } from "./model.js";
-import type { TreeService } from "./service.js";
+import type {
+  HandDownDelivery,
+  HandDownOutcome,
+  TreeService,
+} from "./service.js";
 
 export class CliUsageError extends Error {}
 
@@ -123,7 +127,7 @@ const USAGE = [
   "bb tree dep add|remove --parent <node> --child <node>",
   "bb tree context <node>",
   "bb tree artifact read|write <node>",
-  "bb tree start|resend|complete|compact|reopen|working|ack <node>",
+  "bb tree start|resend|handdown|complete|compact|reopen|working|ack <node>",
   "bb tree summary <node> --text <summary>",
   "bb tree layout <project>",
 ].join("\n");
@@ -173,6 +177,11 @@ export const TREE_CLI_COMMANDS = [
     name: "resend",
     summary: "Send the current context to an agent task's existing thread.",
     usage: "bb tree resend <node> [--json]",
+  },
+  {
+    name: "handdown",
+    summary: "Send a task's context to the tasks that depend on it.",
+    usage: "bb tree handdown <node> [--json]",
   },
   {
     name: "complete",
@@ -248,6 +257,18 @@ function nodeLine(node: TreeNode): string {
   }
   if (node.summary.length > 0) parts.push(`    summary: ${node.summary}`);
   return parts.join("\n");
+}
+
+const HAND_DOWN_TEXT: Record<HandDownOutcome, string> = {
+  sent: "received it in its thread",
+  on_start: "has no thread yet, so it will receive this when it starts",
+  note: "is a note, so it reads its parents itself",
+  failed: "could not be reached",
+};
+
+function handDownLine(delivery: HandDownDelivery): string {
+  const problem = delivery.problem === null ? "" : `\n    ${delivery.problem}`;
+  return `${delivery.nodeId}  ${delivery.title} ${HAND_DOWN_TEXT[delivery.outcome]}.${problem}`;
 }
 
 function projectLine(project: TreeProject): string {
@@ -722,6 +743,17 @@ export function createTreeCli(deps: TreeCliDeps) {
         json,
         payload: { node: resent },
         text: nodeLine(resent),
+      });
+    }
+    if (command === "handdown") {
+      const { deliveries } = await service.handDownContext({ nodeId: node.id });
+      return result({
+        json,
+        payload: { deliveries },
+        text:
+          deliveries.length === 0
+            ? `${node.title} has no tasks depending on it.`
+            : deliveries.map((delivery) => handDownLine(delivery)).join("\n"),
       });
     }
     if (command === "complete") {
