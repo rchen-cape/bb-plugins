@@ -994,6 +994,68 @@ describe("trees service", () => {
     expect(preview.prompt).toContain("full output");
   });
 
+  /*
+   * The whole point of choosing to send the document is that the summary is
+   * not wanted. Compacting anyway costs a model call and a wait to produce
+   * text no context path will ever show.
+   */
+  it("does not summarize a task that hands over its whole document", async () => {
+    const { call } = await loadPlugin(fakes);
+    const project = await createProject(call, "Auth");
+    const note = await createNode(call, {
+      projectId: project.id,
+      title: "Research",
+      kind: "markdown",
+      handoff: "full",
+    });
+    fakes.files.set(note.artifactPath, "Exact wording.");
+
+    const before = fakes.spawns.length;
+    const completion = (await call("node_complete", {
+      nodeId: note.id,
+      awaitSummary: true,
+    })) as unknown as { node: TreeNode; summaryProblem: string | null };
+
+    expect(completion.node.state).toBe("completed");
+    expect(completion.node.summaryStatus).toBe("idle");
+    expect(completion.node.summary).toBe("");
+    expect(completion.summaryProblem).toBeNull();
+    // No hidden worker was asked for a summary nobody reads.
+    expect(fakes.spawns.length).toBe(before);
+  });
+
+  it("still summarizes a task that keeps to its summary", async () => {
+    const { call } = await loadPlugin(fakes);
+    const project = await createProject(call, "Auth");
+    const note = await createNode(call, {
+      projectId: project.id,
+      title: "Research",
+      kind: "markdown",
+    });
+    fakes.files.set(note.artifactPath, "Exact wording.");
+
+    const before = fakes.spawns.length;
+    await call("node_complete", { nodeId: note.id, awaitSummary: true });
+    expect(fakes.spawns.length).toBeGreaterThan(before);
+  });
+
+  it("refuses to compact a task whose summary would go unread", async () => {
+    const { call } = await loadPlugin(fakes);
+    const project = await createProject(call, "Auth");
+    const note = await createNode(call, {
+      projectId: project.id,
+      title: "Research",
+      kind: "markdown",
+      handoff: "full",
+    });
+    fakes.files.set(note.artifactPath, "Exact wording.");
+    await call("node_complete", { nodeId: note.id, awaitSummary: true });
+
+    await expect(call("node_compact", { nodeId: note.id })).rejects.toThrow(
+      /hands its whole document downstream/u,
+    );
+  });
+
   it("goes back to the summary when the note is switched back", async () => {
     const { call } = await loadPlugin(fakes);
     const project = await createProject(call, "Auth");

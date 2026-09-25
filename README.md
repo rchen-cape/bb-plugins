@@ -209,6 +209,11 @@ child on the default auto-compact. Staleness follows the same rule — a child
 reading a parent's document is warned when that document changes, and is not
 disturbed by a rewrite of a summary it never sees.
 
+Choosing it also skips the compaction step: nothing would read that summary, so
+completing the task writes none and does not call a model. Its Summary section
+is marked _unused_, and `bb tree compact <task>` is refused with the reason.
+Set the task back to passing its summary to get one.
+
 Read the assembled prompt with `bb tree context <task>`, or **Preview what it
 will see** in the panel. Nothing starts on its own: a finished parent makes its
 children ready and stops there.
@@ -223,7 +228,8 @@ Completing a task does three things:
 2. Recomputes state, so the tasks that depend on it become ready.
 3. Queues a summary, and compacts it in the background. An agent task is asked
    for a summary spec in its own thread; a note is summarized by a short hidden
-   thread that is archived and stopped afterwards.
+   thread that is archived and stopped afterwards. A task that passes its whole
+   document downstream skips this step entirely.
 
 Only the first two are synchronous. Marking a task done in the panel takes
 effect immediately and the summary lands a moment later — the Summary section

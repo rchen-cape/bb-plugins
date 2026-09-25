@@ -1316,6 +1316,22 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
         summary: node.summary,
         now,
       });
+      /*
+       * Nothing reads the summary of a task that hands over its whole
+       * document: every context path sends the document instead, and the
+       * digest hashes the document too. Asking a model to compact it would
+       * cost a call and a wait to produce text no task will ever be shown.
+       */
+      if (node.handoff === "full") {
+        updateNodeRow(db, {
+          nodeId: node.id,
+          now,
+          summaryStatus: "idle",
+          summaryProblem: null,
+        });
+        publish(node.projectId);
+        return { node: nodeView(node.id), summaryProblem: null };
+      }
       updateNodeRow(db, {
         nodeId: node.id,
         now,
@@ -1333,6 +1349,11 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
 
     compactNode(args) {
       const node = requireNode(args.nodeId);
+      if (node.handoff === "full") {
+        throw new TreeError(
+          `${node.title} hands its whole document downstream, so a summary of it would never be read. Set it to pass its summary first.`,
+        );
+      }
       updateNodeRow(db, {
         nodeId: node.id,
         now: Date.now(),

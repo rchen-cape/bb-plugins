@@ -360,6 +360,7 @@ export function NodeDetail(props: NodeDetailProps) {
 
   const busy = props.busyAction !== null;
   const isFinished = node.state === "completed" || node.state === "stale";
+  const summaryIsRead = node.handoff === "summary";
   const parents = node.dependsOn
     .map((parentId) =>
       props.projectNodes.find((candidate) => candidate.id === parentId),
@@ -663,7 +664,7 @@ export function NodeDetail(props: NodeDetailProps) {
             </select>
             <p className="text-2xs text-subtle-foreground">
               {node.handoff === "full"
-                ? "Tasks depending on this one receive this document in full, however little context they asked for."
+                ? "Tasks depending on this one receive this document in full, however little context they asked for. Completing it skips the summary step."
                 : "Tasks depending on this one receive its summary unless they ask for full parent output."}
             </p>
           </Field>
@@ -835,48 +836,61 @@ export function NodeDetail(props: NodeDetailProps) {
         </Disclosure>
 
         <Disclosure
-          key={`summary:${node.id}:${isFinished ? "open" : "closed"}`}
-          title="Summary passed downstream"
+          key={`summary:${node.id}:${summaryIsRead && isFinished ? "open" : "closed"}`}
+          title={summaryIsRead ? "Summary passed downstream" : "Summary"}
           /*
            * Borrowed from the task states, so a summary in flight reads as
            * in progress and one that did not land reads as a problem.
            */
           note={
-            node.summaryStatus === "pending" ? (
+            !summaryIsRead ? (
+              <span className="shrink-0 text-subtle-foreground">· unused</span>
+            ) : node.summaryStatus === "pending" ? (
               <span className="shrink-0 text-warning-text">· summarizing…</span>
             ) : node.summaryStatus === "failed" ? (
               <span className="shrink-0 text-destructive-text">· failed</span>
             ) : undefined
           }
-          defaultOpen={isFinished}
+          defaultOpen={summaryIsRead && isFinished}
         >
-          {node.summaryStatus === "failed" && node.summaryProblem !== null ? (
-            <p className="text-xs text-destructive" role="alert">
-              {node.summaryProblem}
+          {summaryIsRead ? null : (
+            <p className="text-xs text-subtle-foreground">
+              This task passes its whole document downstream, so completing it
+              writes no summary and no task would be shown one.
             </p>
+          )}
+          {summaryIsRead ? (
+            <>
+              {node.summaryStatus === "failed" &&
+              node.summaryProblem !== null ? (
+                <p className="text-xs text-destructive" role="alert">
+                  {node.summaryProblem}
+                </p>
+              ) : null}
+              <Textarea
+                aria-label="Summary"
+                placeholder="Completing this task fills this in."
+                className="min-h-20 resize-y text-xs"
+                value={summary}
+                onChange={(event) => setSummary(event.target.value)}
+                onBlur={() => {
+                  if (summary !== node.summary) props.onSaveSummary(summary);
+                }}
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy || node.summaryStatus === "pending"}
+                onClick={props.onCompact}
+              >
+                {node.summaryStatus === "pending"
+                  ? "Summarizing…"
+                  : node.summaryStatus === "failed"
+                    ? "Try again"
+                    : "Compact with AI"}
+              </Button>
+            </>
           ) : null}
-          <Textarea
-            aria-label="Summary"
-            placeholder="Completing this task fills this in."
-            className="min-h-20 resize-y text-xs"
-            value={summary}
-            onChange={(event) => setSummary(event.target.value)}
-            onBlur={() => {
-              if (summary !== node.summary) props.onSaveSummary(summary);
-            }}
-          />
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy || node.summaryStatus === "pending"}
-            onClick={props.onCompact}
-          >
-            {node.summaryStatus === "pending"
-              ? "Summarizing…"
-              : node.summaryStatus === "failed"
-                ? "Try again"
-                : "Compact with AI"}
-          </Button>
         </Disclosure>
       </div>
     </div>

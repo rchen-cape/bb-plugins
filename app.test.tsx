@@ -413,6 +413,30 @@ describe("Trees panel", () => {
     await finished.findByLabelText("Summary");
   });
 
+  /*
+   * A task that hands over its whole document is never summarized, so the
+   * box would sit empty for good and compacting it is refused by the server.
+   */
+  it("offers no summary for a task that hands over its whole document", async () => {
+    const done = node({
+      id: "trn_10",
+      state: "completed",
+      kind: "markdown",
+      handoff: "full",
+    });
+    const slot = renderSlot(
+      panel,
+      { subPath: `${project.id}/${done.id}` },
+      { rpc: baseRpc({ graph_get: () => ({ project, nodes: [done] }) }) },
+    );
+
+    await slot.findByText("· unused");
+    fireEvent.click(slot.getByRole("button", { name: /^Summary/ }));
+    await slot.findByText(/passes its whole document downstream/);
+    expect(slot.queryByLabelText("Summary")).toBeNull();
+    expect(slot.queryByRole("button", { name: "Compact with AI" })).toBeNull();
+  });
+
   it("previews the assembled context on request", async () => {
     const slot = renderSlot(
       panel,
