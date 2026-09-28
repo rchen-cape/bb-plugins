@@ -1199,6 +1199,86 @@ describe("Trees panel", () => {
   });
 
   /*
+   * Dropping a picture into a note has to leave the note a Markdown file
+   * that points at it, or nothing downstream would ever be shown it.
+   */
+  it("stores a dropped image and writes the reference into the note", async () => {
+    const attached: unknown[] = [];
+    const slot = renderSlot(
+      panel,
+      { subPath: `${project.id}/${requirements.id}` },
+      {
+        rpc: baseRpc({
+          assets_preview: () => ({
+            baseUrl: "http://127.0.0.1:1/preview",
+            expiresAtMs: 9_999,
+          }),
+          image_attach: (input: never) => {
+            attached.push(input);
+            return {
+              markdown: "![shot.png](assets/abc123.png)",
+              assetFile: "abc123.png",
+              url: "http://127.0.0.1:1/preview/abc123.png",
+            };
+          },
+          artifact_write: () => ({ sha256: "def" }),
+        }),
+      },
+    );
+
+    const document = (await slot.findByLabelText(
+      "Task document",
+    )) as HTMLTextAreaElement;
+    const file = new File(["png bytes"], "shot.png", { type: "image/png" });
+    fireEvent.drop(document.parentElement!, {
+      dataTransfer: { files: [file], items: [{ kind: "file" }] },
+    });
+
+    await waitFor(() => {
+      expect(attached).toHaveLength(1);
+    });
+    expect(attached[0]).toMatchObject({
+      nodeId: requirements.id,
+      fileName: "shot.png",
+    });
+    await waitFor(() => {
+      expect(document.value).toContain("![shot.png](assets/abc123.png)");
+    });
+    // And the image itself, not just its reference in the text.
+    const thumbnail = await slot.findByRole("img", { name: "shot.png" });
+    expect(thumbnail.getAttribute("src")).toBe(
+      "http://127.0.0.1:1/preview/abc123.png",
+    );
+  });
+
+  it("leaves a dropped file that is not an image alone", async () => {
+    const attached: unknown[] = [];
+    const slot = renderSlot(
+      panel,
+      { subPath: `${project.id}/${requirements.id}` },
+      {
+        rpc: baseRpc({
+          image_attach: (input: never) => {
+            attached.push(input);
+            return { markdown: "", assetFile: "", url: null };
+          },
+        }),
+      },
+    );
+
+    const document = await slot.findByLabelText("Task document");
+    fireEvent.drop(document.parentElement!, {
+      dataTransfer: {
+        files: [new File(["text"], "notes.txt", { type: "text/plain" })],
+        items: [{ kind: "file" }],
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(attached).toEqual([]);
+  });
+
+  /*
    * A note is a file the user writes. Nothing assembles a prompt for it and
    * nothing runs it, so neither choice has any meaning there.
    */

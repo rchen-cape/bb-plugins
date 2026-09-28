@@ -41,6 +41,7 @@ title.
 | `bb tree dep add\|remove --parent <task> --child <task>`        | Wire or unwire a dependency. Loops are refused.                                                                                                                                                              |
 | `bb tree context <task>`                                        | Print the exact context an agent task will receive.                                                                                                                                                          |
 | `bb tree artifact read\|write <task>`                           | Read or replace a task's Markdown file.                                                                                                                                                                      |
+| `bb tree image add\|list <task>`                                | Attach an image to a note (`--file <path>`, `--machine <id-or-name>`), or list the ones it carries with their paths.                                                                                         |
 | `bb tree start <task>`                                          | Spawn the agent task's thread with its assembled context.                                                                                                                                                    |
 | `bb tree resend <task>`                                         | Send the current context into an agent task's existing thread.                                                                                                                                               |
 | `bb tree handdown <task>`                                       | Push this task's context to the tasks that depend on it. A child with a thread receives it as a message; one without gets it when it starts.                                                                 |
@@ -118,10 +119,23 @@ handoff, set with `bb tree node update <task> --handoff <mode>`:
   which you set with `bb tree summary <task> --text "…"`. Completion never
   overwrites it.
 - `full` — downstream tasks receive the whole Markdown file, however little
-  they asked for, and no summary is written at all.
+  they asked for, and no summary is written at all. This is the only handoff
+  that carries a note's images: they arrive as image parts of the prompt,
+  after the text that names them.
 
 The producer wins: a `full` parent sends its document even to a child on
 `auto_compact`. Only `summary` costs a model call on completion.
+
+## Images in a note
+
+A note can carry images. They live in `<tree folder>/assets/`, named by their
+content, and the note refers to them the ordinary Markdown way:
+`![the login screen](assets/6f1c4b2a91d83e07.png)`. Add one with
+`bb tree image add <note> --file <path>`, which stores it and appends the
+reference; `bb tree image list <note>` prints what a note carries.
+
+Raster formats up to 10MB (PNG, JPEG, GIF, WebP, AVIF, HEIC, BMP, TIFF). SVG is
+refused. Only a `full` handoff sends them downstream.
 
 ## Handing the context down
 

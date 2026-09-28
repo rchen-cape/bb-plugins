@@ -21,9 +21,16 @@ interface SpawnRecord {
   id: string;
   projectId: string;
   prompt: string;
+  input: PromptPart[];
   title: string;
   visibility: string | undefined;
   environment: unknown;
+}
+
+interface PromptPart {
+  type: string;
+  text?: string;
+  path?: string;
 }
 
 interface FakeEnvironment {
@@ -41,7 +48,7 @@ interface Fakes {
   directories: Set<string>;
   environments: Map<string, FakeEnvironment>;
   spawns: SpawnRecord[];
-  sent: { threadId: string; text: string }[];
+  sent: { threadId: string; text: string; input: PromptPart[] }[];
   archived: string[];
   stopped: string[];
   summaryFailure: string | null;
@@ -136,6 +143,10 @@ function buildSdk(fakes: Fakes) {
       ],
     },
     files: {
+      createPreview: async ({ rootPath }: { rootPath: string }) => ({
+        baseUrl: `http://127.0.0.1:1/preview/${encodeURIComponent(rootPath)}`,
+        expiresAtMs: 2_000,
+      }),
       mkdir: async ({ path }: { path: string }) => {
         fakes.directories.add(path);
         return { created: true };
@@ -182,6 +193,7 @@ function buildSdk(fakes: Fakes) {
       spawn: async (args: {
         projectId: string;
         prompt?: string;
+        input?: PromptPart[];
         title?: string;
         visibility?: string;
         environment: unknown;
@@ -194,10 +206,18 @@ function buildSdk(fakes: Fakes) {
           output: hidden ? SUMMARY_TEXT : NODE_OUTPUT,
           busyReads: hidden ? 1 : 0,
         });
+        const parts = args.input ?? [];
         fakes.spawns.push({
           id,
           projectId: args.projectId,
-          prompt: args.prompt ?? "",
+          // The SDK takes either; a caller passing parts still has a prompt.
+          prompt:
+            args.prompt ??
+            parts
+              .filter((part) => part.type === "text")
+              .map((part) => String(part.text ?? ""))
+              .join("\n"),
+          input: parts,
           title: args.title ?? "",
           visibility: args.visibility,
           environment: args.environment,
@@ -218,11 +238,15 @@ function buildSdk(fakes: Fakes) {
         input,
       }: {
         threadId: string;
-        input: { type: string; text?: string }[];
+        input: PromptPart[];
       }) => {
         const thread = threads.get(threadId);
         if (thread === undefined) throw new Error(`unknown thread ${threadId}`);
-        fakes.sent.push({ threadId, text: input[0]?.text ?? "" });
+        fakes.sent.push({
+          threadId,
+          text: String(input[0]?.text ?? ""),
+          input,
+        });
         if (fakes.summaryFailure !== null) {
           throw new Error(fakes.summaryFailure);
         }
@@ -1225,6 +1249,138 @@ describe("trees service", () => {
     expect(
       deliveries.find((delivery) => delivery.nodeId === waiting.id)?.outcome,
     ).toBe("on_start");
+  });
+
+  /*
+   * A note's images are the reason a whole-document handoff exists for some
+   * work: a spec with a screenshot in it is not the same document without it.
+   */
+  it("stores an image beside the note and references it from the document", async () => {
+    const { call } = await loadPlugin(fakes);
+    const project = await createProject(call, "Auth");
+    const note = await createNode(call, {
+      projectId: project.id,
+      title: "Research",
+      kind: "markdown",
+    });
+
+    const attached = (await call("image_attach", {
+      nodeId: note.id,
+      fileName: "Login screen.png",
+      contentBase64: Buffer.from("fake png bytes").toString("base64"),
+    })) as unknown as { markdown: string; assetFile: string; url: string };
+
+    expect(attached.assetFile).toMatch(/^[0-9a-f]{16}\.png$/u);
+    expect(attached.markdown).toBe(
+      `![Login screen.png](assets/${attached.assetFile})`,
+    );
+    const stored = `${ROOT}/auth/assets/${attached.assetFile}`;
+    expect(fakes.files.get(stored)).toBe(
+      Buffer.from("fake png bytes").toString("base64"),
+    );
+    expect(attached.url).toContain(attached.assetFile);
+  });
+
+  it("refuses what it cannot store or show", async () => {
+    const { call } = await loadPlugin(fakes);
+    const project = await createProject(call, "Auth");
+    const note = await createNode(call, {
+      projectId: project.id,
+      title: "Research",
+      kind: "markdown",
+    });
+    const task = await createNode(call, {
+      projectId: project.id,
+      title: "Specs",
+      kind: "agent",
+      instruction: "Go.",
+    });
+    const png = Buffer.from("bytes").toString("base64");
+
+    await expect(
+      call("image_attach", {
+        nodeId: note.id,
+        fileName: "diagram.svg",
+        contentBase64: png,
+      }),
+    ).rejects.toThrow(/not an image Trees can store/u);
+    await expect(
+      call("image_attach", {
+        nodeId: note.id,
+        fileName: "huge.png",
+        contentBase64: "A".repeat(15 * 1_048_576),
+      }),
+    ).rejects.toThrow(/limited to 10MB/u);
+    await expect(
+      call("image_attach", {
+        nodeId: task.id,
+        fileName: "shot.png",
+        contentBase64: png,
+      }),
+    ).rejects.toThrow(/Only a note carries images/u);
+  });
+
+  it("sends a note's images down with the document that refers to them", async () => {
+    const { call } = await loadPlugin(fakes);
+    const project = await createProject(call, "Auth");
+    const note = await createNode(call, {
+      projectId: project.id,
+      title: "Research",
+      kind: "markdown",
+      handoff: "full",
+    });
+    const child = await createNode(call, {
+      projectId: project.id,
+      title: "Spec",
+      kind: "agent",
+      instruction: "Build what the note shows.",
+      dependsOn: [note.id],
+    });
+    fakes.files.set(
+      note.artifactPath,
+      "# Research\n\nThe flow:\n\n![the login screen](assets/abc123.png)\n",
+    );
+    await call("node_complete", { nodeId: note.id, awaitSummary: true });
+
+    const preview = (await call("context_preview", {
+      nodeId: child.id,
+    })) as unknown as { prompt: string; imagePaths: string[] };
+    expect(preview.imagePaths).toEqual([`${ROOT}/auth/assets/abc123.png`]);
+    expect(preview.prompt).toContain("the login screen");
+
+    await call("node_start", { nodeId: child.id });
+    const spawn = fakes.spawns.at(-1);
+    expect(spawn?.input).toEqual([
+      expect.objectContaining({ type: "text" }),
+      { type: "localImage", path: `${ROOT}/auth/assets/abc123.png` },
+    ]);
+  });
+
+  it("leaves the images behind when only the summary goes down", async () => {
+    const { call } = await loadPlugin(fakes);
+    const project = await createProject(call, "Auth");
+    const note = await createNode(call, {
+      projectId: project.id,
+      title: "Research",
+      kind: "markdown",
+    });
+    const child = await createNode(call, {
+      projectId: project.id,
+      title: "Spec",
+      kind: "agent",
+      instruction: "Build it.",
+      dependsOn: [note.id],
+    });
+    fakes.files.set(
+      note.artifactPath,
+      "# Research\n\n![the login screen](assets/abc123.png)\n",
+    );
+    await call("node_complete", { nodeId: note.id, awaitSummary: true });
+
+    const preview = (await call("context_preview", {
+      nodeId: child.id,
+    })) as unknown as { imagePaths: string[] };
+    expect(preview.imagePaths).toEqual([]);
   });
 
   it("refuses to compact a task whose summary would go unread", async () => {

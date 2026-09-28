@@ -17,6 +17,8 @@ import {
   type TreeProject,
   type WorkspaceTarget,
 } from "./model.js";
+import { referencedImages } from "./images.js";
+import { assetPath } from "./paths.js";
 import type {
   HandDownDelivery,
   HandDownOutcome,
@@ -127,6 +129,7 @@ const USAGE = [
   "bb tree dep add|remove --parent <node> --child <node>",
   "bb tree context <node>",
   "bb tree artifact read|write <node>",
+  "bb tree image add|list <node> [--file <path>]",
   "bb tree start|resend|handdown|complete|compact|reopen|working|ack <node>",
   "bb tree summary <node> --text <summary>",
   "bb tree layout <project>",
@@ -167,6 +170,12 @@ export const TREE_CLI_COMMANDS = [
     summary: "Read or replace a task's Markdown output file.",
     usage:
       "bb tree artifact read|write <node> [--content <text>] [--content-file <path>] [--machine <id-or-name>] [--json]",
+  },
+  {
+    name: "image",
+    summary: "Attach an image to a note, or list the ones it carries.",
+    usage:
+      "bb tree image add|list <node> [--file <path>] [--machine <id-or-name>] [--json]",
   },
   {
     name: "start",
@@ -717,6 +726,73 @@ export function createTreeCli(deps: TreeCliDeps) {
         });
       }
       throw new CliUsageError(`Unknown artifact action "${String(action)}".`);
+    }
+    if (command === "image") {
+      const action = args.positionals[1];
+      const node = resolveNode(
+        requirePositional(args, 2, "A task"),
+        projectRef,
+      );
+      if (action === "list") {
+        const artifact = await service.readArtifact({ nodeId: node.id });
+        const project = service.getProject(node.projectId);
+        const images = referencedImages(artifact.content).map((image) => ({
+          ...image,
+          path: assetPath({
+            directory: project.directory,
+            assetFile: image.assetFile,
+          }),
+        }));
+        return result({
+          json,
+          payload: { images },
+          text:
+            images.length === 0
+              ? `${node.title} carries no images.`
+              : images
+                  .map((image) => `${image.path}\n    alt: ${image.alt}`)
+                  .join("\n"),
+        });
+      }
+      if (action === "add") {
+        const file = requireOption(args, "file");
+        const hostId = await resolveInvokingHostId(
+          context,
+          args.options.get("machine"),
+        );
+        const read = await bb.sdk.files.read({
+          path: file,
+          ...(hostId === undefined ? {} : { hostId }),
+        });
+        if ("notModified" in read) {
+          throw new CliUsageError(`${file} could not be read.`);
+        }
+        const contentBase64 =
+          read.contentEncoding === "base64"
+            ? read.content
+            : Buffer.from(read.content, "utf8").toString("base64");
+        const attached = await service.attachImage({
+          nodeId: node.id,
+          fileName: file.split("/").at(-1) ?? file,
+          contentBase64,
+        });
+        /*
+         * An image the document does not point at is a file nobody sees and
+         * nothing sends downstream, so adding one references it.
+         */
+        const artifact = await service.readArtifact({ nodeId: node.id });
+        await service.writeArtifact({
+          nodeId: node.id,
+          content: `${artifact.content.replace(/\s*$/u, "")}\n\n${attached.markdown}\n`,
+          expectedSha256: artifact.sha256,
+        });
+        return result({
+          json,
+          payload: { image: attached },
+          text: `Added ${attached.assetFile} to ${node.artifactFile}.`,
+        });
+      }
+      throw new CliUsageError(`Unknown image action "${String(action)}".`);
     }
     if (command === "layout") {
       const project = resolveProject(requirePositional(args, 1, "A project"));

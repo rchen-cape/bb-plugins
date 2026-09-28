@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { PERSONAL_PROJECT_ID } from "@bb/domain";
+import { PERSONAL_PROJECT_ID, type PromptInput } from "@bb/domain";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
@@ -63,10 +63,19 @@ import {
 import {
   artifactFileName,
   artifactPath,
+  assetPath,
+  assetsDirectory,
   isMarkdownStub,
   markdownStub,
   projectDirectory,
 } from "./paths.js";
+import {
+  MAX_IMAGE_BYTES,
+  assetFileName,
+  imageMarkdown,
+  imageMimeType,
+  referencedImages,
+} from "./images.js";
 
 export class TreeError extends Error {}
 
@@ -184,6 +193,25 @@ export interface ArtifactContent {
 export interface ContextPreview {
   prompt: string;
   sourceTitles: string[];
+  /*
+   * Absolute paths of the images that go with the prompt, from parents that
+   * hand their whole document down. They travel as their own prompt parts, so
+   * the model is shown the picture rather than told a path.
+   */
+  imagePaths: string[];
+}
+
+export interface AttachedImage {
+  /** What to write into the document, at the cursor. */
+  markdown: string;
+  assetFile: string;
+  /** Where the panel can load it from now; a lease, not a permanent URL. */
+  url: string | null;
+}
+
+export interface AssetsPreview {
+  baseUrl: string | null;
+  expiresAtMs: number | null;
 }
 
 /*
@@ -279,6 +307,12 @@ export interface TreeService {
     expectedSha256: string | null;
   }): Promise<{ sha256: string }>;
   previewContext(args: { nodeId: string }): Promise<ContextPreview>;
+  attachImage(args: {
+    nodeId: string;
+    fileName: string;
+    contentBase64: string;
+  }): Promise<AttachedImage>;
+  assetsPreview(args: { projectId: string }): Promise<AssetsPreview>;
   startNode(args: { nodeId: string }): Promise<TreeNode>;
   resendContext(args: { nodeId: string }): Promise<TreeNode>;
   handDownContext(args: { nodeId: string }): Promise<HandDownResult>;
@@ -736,6 +770,18 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
       const artifact = sendsDocument
         ? (await readArtifactContent(source, project)).content
         : "";
+      /*
+       * Only a document that is sent brings its pictures, which follows from
+       * the read above: a summary leaves the artifact empty, and a summary is
+       * text about the document that points at no image of its own.
+       */
+      const images = referencedImages(artifact).map((image) => ({
+        name: image.alt,
+        absolutePath: assetPath({
+          directory: project.directory,
+          assetFile: image.assetFile,
+        }),
+      }));
       sources.push({
         nodeId: source.id,
         title: source.title,
@@ -743,6 +789,7 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
         summary: source.summary,
         artifact,
         handoff: source.handoff,
+        images,
       });
     }
     return {
@@ -756,7 +803,44 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
         sources,
       }),
       sourceTitles: sources.map((source) => source.title),
+      imagePaths: sources.flatMap((source) =>
+        source.images.map((image) => image.absolutePath),
+      ),
     };
+  }
+
+  /*
+   * A time-limited URL the app can load the tree's images from. The panel
+   * cannot read the server's disk, and a note's images are not in a project
+   * checkout, so a lease is the only way to show them.
+   */
+  async function assetsBaseUrl(
+    project: ProjectRow,
+  ): Promise<{ baseUrl: string; expiresAtMs: number } | null> {
+    try {
+      return await bb.sdk.files.createPreview({
+        rootPath: assetsDirectory(project.directory),
+      });
+    } catch (error) {
+      bb.log.warn(
+        `Trees could not serve the images in ${project.directory}: ${errorText(error)}`,
+      );
+      return null;
+    }
+  }
+
+  /*
+   * The prompt is the text plus a part per image, in the order the documents
+   * refer to them, which is the order the text says they arrive in.
+   */
+  function promptInput(preview: ContextPreview): PromptInput[] {
+    return [
+      { type: "text" as const, text: preview.prompt, mentions: [] },
+      ...preview.imagePaths.map((path) => ({
+        type: "localImage" as const,
+        path,
+      })),
+    ];
   }
 
   function recordCompletion(args: {
@@ -1239,6 +1323,60 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
       return await buildContextPreview(requireNode(args.nodeId));
     },
 
+    /*
+     * An image dropped on a note is stored beside it and referenced from the
+     * document, so the note stays one Markdown file that happens to have
+     * pictures — not a database row with attachments hidden behind it.
+     */
+    async attachImage(args) {
+      const node = requireNode(args.nodeId);
+      if (node.kind !== "markdown") {
+        throw new TreeError(
+          "Only a note carries images. An agent task's output is whatever its thread writes.",
+        );
+      }
+      const project = requireProject(node.projectId);
+      const mimeType = imageMimeType(args.fileName);
+      if (mimeType === null) {
+        throw new TreeError(
+          `${args.fileName} is not an image Trees can store. Use PNG, JPEG, GIF, WebP, AVIF, HEIC, BMP, or TIFF.`,
+        );
+      }
+      const bytes = Buffer.from(args.contentBase64, "base64");
+      if (bytes.byteLength === 0) {
+        throw new TreeError(`${args.fileName} is empty.`);
+      }
+      if (bytes.byteLength > MAX_IMAGE_BYTES) {
+        throw new TreeError(
+          `${args.fileName} is ${Math.round(bytes.byteLength / 1_048_576)}MB. Images are limited to ${MAX_IMAGE_BYTES / 1_048_576}MB.`,
+        );
+      }
+      const assetFile = assetFileName({
+        fileName: args.fileName,
+        contentDigest: createHash("sha256").update(bytes).digest("hex"),
+      });
+      await bb.sdk.files.write({
+        path: assetPath({ directory: project.directory, assetFile }),
+        rootPath: project.directory,
+        content: bytes.toString("base64"),
+        contentEncoding: "base64",
+        createParents: true,
+      });
+      const lease = await assetsBaseUrl(project);
+      return {
+        markdown: imageMarkdown({ originalName: args.fileName, assetFile }),
+        assetFile,
+        url: lease === null ? null : `${lease.baseUrl}/${assetFile}`,
+      };
+    },
+
+    async assetsPreview(args) {
+      const lease = await assetsBaseUrl(requireProject(args.projectId));
+      return lease === null
+        ? { baseUrl: null, expiresAtMs: null }
+        : { baseUrl: lease.baseUrl, expiresAtMs: lease.expiresAtMs };
+    },
+
     async startNode(args) {
       const node = requireNode(args.nodeId);
       requireRunnable(node);
@@ -1253,7 +1391,7 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
         await bb.sdk.threads.spawn({
           projectId: placement.projectId,
           environment: placement.environment,
-          prompt: preview.prompt,
+          input: promptInput(preview),
           title: node.title,
           pluginMetadata: {
             treeProjectId: node.projectId,
@@ -1283,7 +1421,7 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
       await bb.sdk.threads.send({
         threadId: node.threadId,
         mode: "auto",
-        input: [{ type: "text", text: preview.prompt, mentions: [] }],
+        input: promptInput(preview),
       });
       const now = Date.now();
       updateNodeRow(db, { nodeId: node.id, now, completion: "working" });
@@ -1330,13 +1468,10 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
           await bb.sdk.threads.send({
             threadId: child.threadId,
             mode: "auto",
-            input: [
-              {
-                type: "text",
-                text: additionalContextPrompt({ context: preview.prompt }),
-                mentions: [],
-              },
-            ],
+            input: promptInput({
+              ...preview,
+              prompt: additionalContextPrompt({ context: preview.prompt }),
+            }),
           });
           deliveries.push({
             nodeId: child.id,

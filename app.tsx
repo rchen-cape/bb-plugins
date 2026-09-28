@@ -490,6 +490,21 @@ function TreesPanel({ subPath }: PluginNavPanelProps) {
   const workspaceQuery = useTreesQuery("workspaces", (client) =>
     client.call("workspace_options"),
   );
+  /*
+   * A short-lived URL the app can load this tree's images from. It expires,
+   * which is why it is a query that reloads with the tree rather than
+   * something stored alongside the note.
+   */
+  const assetsQuery = useTreesQuery(
+    route.projectId === null ? null : `assets:${route.projectId}`,
+    (client) => {
+      const projectId = route.projectId;
+      if (projectId === null) {
+        return Promise.reject(new Error("No tree is open."));
+      }
+      return client.call("assets_preview", { projectId });
+    },
+  );
   const needsBranches =
     selectedNodeId !== null &&
     (graphQuery.data?.nodes ?? []).some(
@@ -819,6 +834,7 @@ function TreesPanel({ subPath }: PluginNavPanelProps) {
                 })
               }
               artifact={artifact}
+              assetsBaseUrl={assetsQuery.data?.baseUrl ?? null}
               contextPreview={contextPreview}
               busyAction={busyAction}
               onClose={() => selectNode(null)}
@@ -839,6 +855,19 @@ function TreesPanel({ subPath }: PluginNavPanelProps) {
                   graphQuery.reload();
                 })
               }
+              onAttachImage={async (file) => {
+                const attached = await rpc.call("image_attach", {
+                  nodeId: selectedNode.id,
+                  fileName: file.fileName,
+                  contentBase64: file.contentBase64,
+                });
+                /*
+                 * A first image creates the folder the lease is for, so the
+                 * lease is refreshed rather than left pointing at nothing.
+                 */
+                assetsQuery.reload();
+                return attached.markdown;
+              }}
               onSaveSummary={(summary) =>
                 performQuiet(async () => {
                   await rpc.call("node_summary_set", {

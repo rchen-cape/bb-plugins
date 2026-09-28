@@ -213,7 +213,9 @@ decides what fills the box:
 - **Whole document** — nothing is shown, because what goes down is the document
   above, which you have just read or written. Right for a note whose exact
   wording matters, where a summary would lose the thing that mattered: a
-  specification, a schema, a set of copy strings.
+  specification, a schema, a set of copy strings. This is also the only mode
+  that carries the note's **images**: they travel with the document they
+  belong to.
 
 The producer wins: a parent set to pass its whole document sends it even to a
 child on the default auto-compact. Staleness follows the same rule — a child
@@ -228,6 +230,38 @@ still drafts text on demand under **What I write**, and is refused under
 Read the assembled prompt with `bb tree context <task>`, or **Preview what it
 will see** in the panel. Nothing starts on its own: a finished parent makes its
 children ready and stops there.
+
+## Images in a note
+
+**Drop an image anywhere on a note** and it is stored beside the note, then
+referenced from the document at your cursor:
+
+```
+~/Trees/build_auth_feature/
+├── 01_write_auth_requirements.md      ![the login screen](assets/6f1c….png)
+└── assets/
+    └── 6f1c4b2a91d83e07.png
+```
+
+The note stays one Markdown file. Nothing is hidden in the plugin's database,
+so the same file opened in any editor still shows its images, and the folder
+can be copied or committed whole. Files are named by their content, so dropping
+the same screenshot twice stores it once.
+
+PNG, JPEG, GIF, WebP, AVIF, HEIC, BMP, and TIFF, up to 10MB each. SVG is
+refused: it is a document that can carry script, and these are rendered in the
+app and handed to agents.
+
+A note's images are listed under its editor, and a completed note renders them
+inline. `bb tree image add <task> --file <path>` does the same from the command
+line, and `bb tree image list <task>` prints what a note carries with the paths
+on disk.
+
+**They are sent downstream only under Whole document.** An agent task receiving
+that document gets the pictures as part of its prompt — the images themselves,
+not paths to them — after the text, which names them in the order they arrive.
+A summary cannot carry them: it is text about the document, and nothing in it
+points at an image.
 
 ## Handing the context down
 

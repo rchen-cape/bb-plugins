@@ -1,4 +1,5 @@
 import path from "node:path";
+import { ASSETS_DIRECTORY } from "./images.js";
 
 const SLUG_MAX_LENGTH = 40;
 
@@ -61,6 +62,17 @@ export function artifactPath(args: {
   artifactFile: string;
 }): string {
   return path.join(args.directory, args.artifactFile);
+}
+
+export function assetsDirectory(directory: string): string {
+  return path.join(directory, ASSETS_DIRECTORY);
+}
+
+export function assetPath(args: {
+  directory: string;
+  assetFile: string;
+}): string {
+  return path.join(assetsDirectory(args.directory), args.assetFile);
 }
 
 export function markdownStub(title: string): string {

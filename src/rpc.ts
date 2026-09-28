@@ -169,7 +169,36 @@ export const treesRpcContract = defineRpcContract({
   context_preview: {
     input: nodeTargetSchema,
     output: z
-      .object({ prompt: z.string(), sourceTitles: z.array(z.string()) })
+      .object({
+        prompt: z.string(),
+        sourceTitles: z.array(z.string()),
+        imagePaths: z.array(z.string()),
+      })
+      .strict(),
+  },
+  image_attach: {
+    input: z
+      .object({
+        nodeId: z.string().min(1),
+        fileName: z.string().min(1),
+        contentBase64: z.string().min(1),
+      })
+      .strict(),
+    output: z
+      .object({
+        markdown: z.string(),
+        assetFile: z.string(),
+        url: z.string().nullable(),
+      })
+      .strict(),
+  },
+  assets_preview: {
+    input: z.object({ projectId: z.string().min(1) }).strict(),
+    output: z
+      .object({
+        baseUrl: z.string().nullable(),
+        expiresAtMs: z.number().nullable(),
+      })
       .strict(),
   },
   node_start: {
@@ -319,6 +348,8 @@ export function createRpcHandlers(args: {
       node: await service.resendContext(input),
     }),
     node_hand_down: (input) => service.handDownContext(input),
+    image_attach: (input) => service.attachImage(input),
+    assets_preview: (input) => service.assetsPreview(input),
     node_complete: (input) => service.completeNode(input),
     node_compact: (input) => ({ node: service.compactNode(input) }),
     node_summary_set: (input) => ({ node: service.setSummary(input) }),

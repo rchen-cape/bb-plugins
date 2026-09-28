@@ -19,7 +19,9 @@ import {
   type WorkspaceTarget,
 } from "../src/model";
 import { formatRelativeTime } from "../src/time";
+import { referencedImages, withResolvedAssetUrls } from "../src/images";
 import { nextAutosaveDelayMs } from "./autosave";
+import { ImageDropZone, NoteImageStrip, fileToBase64 } from "./note-images";
 import { StateMenu, type StateOption } from "./state-menu";
 import { KIND_LABELS, kindChipClass, stateChipClass } from "./node-visuals";
 
@@ -54,11 +56,17 @@ export interface NodeDetailProps {
   defaultBranch: string | null;
   branchProblem: string | null;
   artifact: ArtifactState | null;
+  /** Where the panel can load this tree's images from; a lease, or nothing. */
+  assetsBaseUrl: string | null;
   contextPreview: string | null;
   handDown: readonly HandDownDelivery[] | null;
   busyAction: string | null;
   onUpdate: (patch: NodeUpdatePatch) => void;
   onSaveArtifact: (content: string) => Promise<void>;
+  onAttachImage: (args: {
+    fileName: string;
+    contentBase64: string;
+  }) => Promise<string>;
   onSaveSummary: (summary: string) => void;
   onAddDependency: (parentId: string) => void;
   onRemoveDependency: (parentId: string) => void;
@@ -451,6 +459,9 @@ export function NodeDetail(props: NodeDetailProps) {
   const [artifactDraft, setArtifactDraft] = useState<string | null>(null);
   const [isSavingArtifact, setIsSavingArtifact] = useState(false);
   const [dependencyChoice, setDependencyChoice] = useState("");
+  const [attaching, setAttaching] = useState(0);
+  const [imageProblem, setImageProblem] = useState<string | null>(null);
+  const documentRef = useRef<HTMLTextAreaElement | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const firstUnsavedAtRef = useRef<number | null>(null);
   const draftRef = useRef<string | null>(null);
@@ -501,6 +512,8 @@ export function NodeDetail(props: NodeDetailProps) {
     upstreamIds.has(candidate.id),
   );
   const artifactContent = artifactDraft ?? props.artifact?.content ?? "";
+  const documentDisabled = props.artifact === null && artifactDraft === null;
+  const noteImages = referencedImages(artifactContent);
   const childTitles = props.projectNodes
     .filter((candidate) => candidate.dependsOn.includes(node.id))
     .map((candidate) => candidate.title);
@@ -565,6 +578,55 @@ export function NodeDetail(props: NodeDetailProps) {
 
   const flushRef = useRef(() => {});
   flushRef.current = flushArtifactSave;
+
+  /*
+   * Dropped images are stored first, then referenced from the document at the
+   * caret — so the reference always points at a file that exists, and the
+   * note reads where the writer was looking rather than at the end.
+   */
+  const attachImages = (files: readonly File[]) => {
+    setImageProblem(null);
+    setAttaching((count) => count + files.length);
+    void (async () => {
+      for (const file of files) {
+        try {
+          const markdown = await props.onAttachImage({
+            fileName: file.name,
+            contentBase64: await fileToBase64(file),
+          });
+          insertIntoDocument(markdown);
+        } catch (error) {
+          setImageProblem(
+            error instanceof Error ? error.message : String(error),
+          );
+        } finally {
+          setAttaching((count) => Math.max(0, count - 1));
+        }
+      }
+    })();
+  };
+
+  const insertIntoDocument = (markdown: string) => {
+    const current = draftRef.current ?? props.artifact?.content ?? "";
+    const element = documentRef.current;
+    const caret =
+      element === null || element.selectionStart !== element.selectionEnd
+        ? current.length
+        : element.selectionStart;
+    const before = current.slice(0, caret).replace(/[ \t]+$/u, "");
+    const after = current.slice(caret);
+    const lead = before.length === 0 || before.endsWith("\n\n") ? "" : "\n\n";
+    const trail = after.startsWith("\n") || after.length === 0 ? "" : "\n\n";
+    const next = `${before}${lead}${markdown}${trail}${after}`;
+    queueArtifactSave(next);
+    const cursor = `${before}${lead}${markdown}`.length;
+    requestAnimationFrame(() => {
+      const field = documentRef.current;
+      if (field === null) return;
+      field.focus();
+      field.setSelectionRange(cursor, cursor);
+    });
+  };
 
   useEffect(
     () => () => {
@@ -681,6 +743,11 @@ export function NodeDetail(props: NodeDetailProps) {
                 {props.artifact.problem}
               </p>
             ) : null}
+            {imageProblem !== null ? (
+              <p className="shrink-0 text-xs text-destructive" role="alert">
+                {imageProblem}
+              </p>
+            ) : null}
             {isReadOnlyDocument ? (
               <div
                 aria-label="Task document"
@@ -688,17 +755,43 @@ export function NodeDetail(props: NodeDetailProps) {
                 role="article"
                 className="min-h-32 flex-1 overflow-y-auto"
               >
-                <Markdown content={artifactContent} />
+                {/*
+                 * A reference that is right in the file is wrong in a
+                 * browser, which resolves it against the app's own origin.
+                 */}
+                <Markdown
+                  content={
+                    props.assetsBaseUrl === null
+                      ? artifactContent
+                      : withResolvedAssetUrls(
+                          artifactContent,
+                          props.assetsBaseUrl,
+                        )
+                  }
+                />
               </div>
             ) : (
-              <Textarea
-                aria-label="Task document"
-                placeholder="Write the note here."
-                className="min-h-32 flex-1 resize-none py-0 font-mono text-sm rounded-none border-0 bg-transparent px-0 shadow-none focus-visible:ring-0"
-                value={artifactContent}
-                disabled={props.artifact === null && artifactDraft === null}
-                onChange={(event) => queueArtifactSave(event.target.value)}
-                onBlur={flushArtifactSave}
+              <ImageDropZone
+                disabled={documentDisabled}
+                onDropImages={attachImages}
+              >
+                <Textarea
+                  ref={documentRef}
+                  aria-label="Task document"
+                  placeholder="Write the note here, or drop an image into it."
+                  className="min-h-32 flex-1 resize-none py-0 font-mono text-sm rounded-none border-0 bg-transparent px-0 shadow-none focus-visible:ring-0"
+                  value={artifactContent}
+                  disabled={documentDisabled}
+                  onChange={(event) => queueArtifactSave(event.target.value)}
+                  onBlur={flushArtifactSave}
+                />
+              </ImageDropZone>
+            )}
+            {isReadOnlyDocument ? null : (
+              <NoteImageStrip
+                images={noteImages}
+                baseUrl={props.assetsBaseUrl}
+                pending={attaching}
               />
             )}
           </>

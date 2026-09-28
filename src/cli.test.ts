@@ -47,6 +47,10 @@ function buildSdk(fakes: Fakes) {
     },
     environments: { get: async () => ({ id: "env_1", hostId: "host_2" }) },
     files: {
+      createPreview: async () => ({
+        baseUrl: "http://127.0.0.1:1/preview",
+        expiresAtMs: 2_000,
+      }),
       mkdir: async () => ({ created: true }),
       read: async ({ path }: { path: string }) => {
         const content = fakes.files.get(path);
@@ -531,6 +535,45 @@ describe("bb tree", () => {
     const childless = await run(host, ["handdown", "Specs"]);
     expect(childless.exitCode, childless.stderr).toBe(0);
     expect(childless.stdout).toContain("no tasks depending on it");
+  });
+
+  it("attaches an image to a note and lists what it carries", async () => {
+    const host = await loadPlugin(fakes);
+    await runJson(host, ["project", "create", "--name", "Auth"]);
+    await runJson(host, [
+      "node",
+      "create",
+      "--project",
+      "Auth",
+      "--title",
+      "Research",
+      "--kind",
+      "markdown",
+    ]);
+    fakes.files.set("/Users/me/shot.png", "pretend png");
+
+    const added = await run(host, [
+      "image",
+      "add",
+      "Research",
+      "--file",
+      "/Users/me/shot.png",
+    ]);
+    expect(added.exitCode, added.stderr).toBe(0);
+    expect(added.stdout).toContain("01_research.md");
+
+    const listed = await runJson<{
+      images: { assetFile: string; alt: string; path: string }[];
+    }>(host, ["image", "list", "Research"]);
+    expect(listed.images).toHaveLength(1);
+    expect(listed.images[0]?.alt).toBe("shot.png");
+    expect(listed.images[0]?.path).toContain("/auth/assets/");
+
+    // The document points at it, or nothing downstream would ever see it.
+    const document = await run(host, ["artifact", "read", "Research"]);
+    expect(document.stdout).toContain(
+      `![shot.png](assets/${listed.images[0]?.assetFile ?? ""})`,
+    );
   });
 
   it("starts an agent task in a directory named on the command line", async () => {

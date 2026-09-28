@@ -9,6 +9,7 @@ function source(overrides: Partial<ContextSource> = {}): ContextSource {
     summary: "Users need OAuth2 with Google and GitHub.",
     artifact: "# User research\n\nLong findings.",
     handoff: "summary",
+    images: [],
     ...overrides,
   };
 }
@@ -43,6 +44,42 @@ describe("assembleContext", () => {
       "### Context from User research (01_user_research.md, full output)",
     );
     expect(prompt).toContain("Long findings.");
+  });
+
+  /*
+   * The pictures arrive as their own prompt parts, so the text has to say
+   * which is which — otherwise a document mentioning three screenshots gets
+   * three unlabelled images after it.
+   */
+  it("names the images that travel with a document it sends", () => {
+    const prompt = assembleContext({
+      ...base,
+      mode: "full_parents",
+      sources: [
+        source({
+          images: [
+            { name: "the login screen", absolutePath: "/t/assets/a.png" },
+            { name: "the error state", absolutePath: "/t/assets/b.png" },
+          ],
+        }),
+      ],
+    });
+    expect(prompt).toContain(
+      "The images attached to this message are, in order, the ones 01_user_research.md refers to: the login screen, the error state.",
+    );
+  });
+
+  it("says nothing about images when only the summary goes", () => {
+    const prompt = assembleContext({
+      ...base,
+      mode: "auto_compact",
+      sources: [
+        source({
+          images: [{ name: "the login screen", absolutePath: "/t/a.png" }],
+        }),
+      ],
+    });
+    expect(prompt).not.toContain("images attached");
   });
 
   it("labels each parent separately so a merge task can tell them apart", () => {
