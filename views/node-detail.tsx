@@ -773,83 +773,90 @@ export function NodeDetail(props: NodeDetailProps) {
             ) : null}
           </Field>
 
-          <Field label="Context it receives">
-            <select
-              aria-label="Context mode"
-              className={selectClass}
-              value={node.contextMode}
-              onChange={(event) => {
-                const mode = CONTEXT_MODES.find(
-                  (candidate) => candidate === event.target.value,
-                );
-                if (mode !== undefined) props.onUpdate({ contextMode: mode });
-              }}
-            >
-              {CONTEXT_MODES.map((mode) => (
-                <option key={mode} value={mode}>
-                  {CONTEXT_MODE_LABELS[mode]}
-                </option>
-              ))}
-            </select>
-            {node.contextMode === "custom" ? (
-              <>
-                <Textarea
-                  aria-label="What this task needs from upstream"
-                  placeholder="What should be carried down from upstream?"
-                  className="min-h-16 resize-y text-xs"
-                  value={customBrief}
-                  onChange={(event) => setCustomBrief(event.target.value)}
-                  onBlur={() => {
-                    if (customBrief !== node.customBrief) {
-                      props.onUpdate({ customBrief });
-                    }
-                  }}
-                />
-                {includeCandidates.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">
-                    Nothing upstream yet.
-                  </p>
-                ) : (
-                  includeCandidates.map((candidate) => (
-                    <label
-                      key={candidate.id}
-                      className="flex min-w-0 items-center gap-2 text-xs"
-                    >
-                      <input
-                        type="checkbox"
-                        className="shrink-0"
-                        checked={node.contextIncludes.includes(candidate.id)}
-                        onChange={(event) => {
-                          const next = event.target.checked
-                            ? [...node.contextIncludes, candidate.id]
-                            : node.contextIncludes.filter(
-                                (id) => id !== candidate.id,
-                              );
-                          props.onUpdate({ contextIncludes: next });
-                        }}
-                      />
-                      <span className="min-w-0 truncate">
-                        {candidate.title}
-                      </span>
-                    </label>
-                  ))
-                )}
-              </>
-            ) : null}
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={props.onPreviewContext}
-            >
-              {props.busyAction === "preview" ? "Loading…" : "Preview"}
-            </Button>
-            {props.contextPreview !== null ? (
-              <pre className="max-h-48 overflow-auto rounded-md border border-border bg-muted/30 p-2 text-2xs whitespace-pre-wrap">
-                {props.contextPreview}
-              </pre>
-            ) : null}
-          </Field>
+          {/*
+           * Only an agent task is handed a prompt. A note is a file the user
+           * writes, so it has no upstream context to receive, nothing to
+           * assemble, and nothing to preview.
+           */}
+          {node.kind === "agent" ? (
+            <Field label="Context it receives">
+              <select
+                aria-label="Context mode"
+                className={selectClass}
+                value={node.contextMode}
+                onChange={(event) => {
+                  const mode = CONTEXT_MODES.find(
+                    (candidate) => candidate === event.target.value,
+                  );
+                  if (mode !== undefined) props.onUpdate({ contextMode: mode });
+                }}
+              >
+                {CONTEXT_MODES.map((mode) => (
+                  <option key={mode} value={mode}>
+                    {CONTEXT_MODE_LABELS[mode]}
+                  </option>
+                ))}
+              </select>
+              {node.contextMode === "custom" ? (
+                <>
+                  <Textarea
+                    aria-label="What this task needs from upstream"
+                    placeholder="What should be carried down from upstream?"
+                    className="min-h-16 resize-y text-xs"
+                    value={customBrief}
+                    onChange={(event) => setCustomBrief(event.target.value)}
+                    onBlur={() => {
+                      if (customBrief !== node.customBrief) {
+                        props.onUpdate({ customBrief });
+                      }
+                    }}
+                  />
+                  {includeCandidates.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      Nothing upstream yet.
+                    </p>
+                  ) : (
+                    includeCandidates.map((candidate) => (
+                      <label
+                        key={candidate.id}
+                        className="flex min-w-0 items-center gap-2 text-xs"
+                      >
+                        <input
+                          type="checkbox"
+                          className="shrink-0"
+                          checked={node.contextIncludes.includes(candidate.id)}
+                          onChange={(event) => {
+                            const next = event.target.checked
+                              ? [...node.contextIncludes, candidate.id]
+                              : node.contextIncludes.filter(
+                                  (id) => id !== candidate.id,
+                                );
+                            props.onUpdate({ contextIncludes: next });
+                          }}
+                        />
+                        <span className="min-w-0 truncate">
+                          {candidate.title}
+                        </span>
+                      </label>
+                    ))
+                  )}
+                </>
+              ) : null}
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy}
+                onClick={props.onPreviewContext}
+              >
+                {props.busyAction === "preview" ? "Loading…" : "Preview"}
+              </Button>
+              {props.contextPreview !== null ? (
+                <pre className="max-h-48 overflow-auto rounded-md border border-border bg-muted/30 p-2 text-2xs whitespace-pre-wrap">
+                  {props.contextPreview}
+                </pre>
+              ) : null}
+            </Field>
+          ) : null}
 
           {node.kind === "agent" ? (
             <Field label="Where it runs">

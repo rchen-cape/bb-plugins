@@ -1198,7 +1198,11 @@ describe("Trees panel", () => {
     });
   });
 
-  it("does not offer a workspace choice for a note", async () => {
+  /*
+   * A note is a file the user writes. Nothing assembles a prompt for it and
+   * nothing runs it, so neither choice has any meaning there.
+   */
+  it("offers a note neither a workspace nor a context to receive", async () => {
     const slot = renderSlot(
       panel,
       { subPath: `${project.id}/${requirements.id}` },
@@ -1206,7 +1210,9 @@ describe("Trees panel", () => {
     );
     await slot.findByLabelText("Task document");
     fireEvent.click(await slot.findByRole("button", { name: "Setup" }));
-    await slot.findByLabelText("Context mode");
+    await slot.findByLabelText("Add a dependency");
+    expect(slot.queryByLabelText("Context mode")).toBeNull();
+    expect(slot.queryByRole("button", { name: "Preview" })).toBeNull();
     expect(slot.queryByLabelText("Workspace")).toBeNull();
   });
 

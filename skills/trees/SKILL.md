@@ -95,6 +95,9 @@ List candidates with `bb env list` and read a task's current choice from
 
 ## Context modes
 
+Only an agent task receives context — it is the prompt its thread opens with.
+A note has none, and its panel offers no context choice.
+
 - `auto_compact` (default) — the child receives only the parents' summaries.
 - `full_parents` — the child receives the parents' complete Markdown output.
   Use it when the exact text matters, such as code generation from a spec.

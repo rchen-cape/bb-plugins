@@ -180,7 +180,12 @@ drift from it.
 Two choices meet here: what a task **receives**, and what each of its parents
 is willing to **give**.
 
-Each task chooses what it receives from upstream:
+Only an **agent task** receives anything: the context is the prompt its thread
+opens with. A note is a file you write, so it has no context to receive and its
+panel offers no such choice — but it still chooses what it passes downstream,
+which is often the whole point of writing it.
+
+Each agent task chooses what it receives from upstream:
 
 - **Auto-compact** (default) — the parents' summaries only.
 - **Full parent output** — the parents' complete Markdown files. Right for code
