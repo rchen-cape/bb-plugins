@@ -4,6 +4,7 @@ import {
   imageMarkdown,
   imageMimeType,
   referencedImages,
+  withImageMarkers,
   withResolvedAssetUrls,
 } from "./images";
 
@@ -68,6 +69,55 @@ describe("image assets", () => {
       "[link](assets/aaa.png)",
     ].join("\n\n");
     expect(referencedImages(markdown)).toEqual([]);
+  });
+
+  /*
+   * A relative reference renders as a broken image in a chat message, and the
+   * pictures arrive as attachments, so the text marks where each one was.
+   */
+  it("marks each image in place and numbers it for the attachment list", () => {
+    const marked = withImageMarkers(
+      [
+        "# Spec",
+        "The flow:",
+        "![the login screen](assets/aaa.png)",
+        "Then:",
+        "![the error state](./assets/bbb.jpg)",
+        "The first one again:",
+        "![whatever](assets/aaa.png)",
+      ].join("\n\n"),
+      0,
+    );
+    expect(marked.text).toBe(
+      [
+        "# Spec",
+        "The flow:",
+        "_[Image 1: the login screen]_",
+        "Then:",
+        "_[Image 2: the error state]_",
+        "The first one again:",
+        // The same file is one attachment, so it keeps its own number.
+        "_[Image 1: the login screen]_",
+      ].join("\n\n"),
+    );
+    expect(marked.images).toEqual([
+      { assetFile: "aaa.png", alt: "the login screen", number: 1 },
+      { assetFile: "bbb.jpg", alt: "the error state", number: 2 },
+    ]);
+  });
+
+  it("numbers from where the last document left off", () => {
+    const marked = withImageMarkers("![shot](assets/ccc.png)", 3);
+    expect(marked.text).toBe("_[Image 4: shot]_");
+    expect(marked.images[0]?.number).toBe(4);
+  });
+
+  it("leaves a reference it will not attach as it found it", () => {
+    const markdown = "![doc](assets/readme.md) ![out](assets/sub/x.png)";
+    expect(withImageMarkers(markdown, 0)).toEqual({
+      text: markdown,
+      images: [],
+    });
   });
 
   it("rewrites references onto the serving base and leaves the rest alone", () => {

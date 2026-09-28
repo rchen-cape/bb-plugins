@@ -257,11 +257,21 @@ inline. `bb tree image add <task> --file <path>` does the same from the command
 line, and `bb tree image list <task>` prints what a note carries with the paths
 on disk.
 
-**They are sent downstream only under Whole document.** An agent task receiving
-that document gets the pictures as part of its prompt — the images themselves,
-not paths to them — after the text, which names them in the order they arrive.
-A summary cannot carry them: it is text about the document, and nothing in it
-points at an image.
+**They are sent downstream only under Whole document**, and on every path that
+sends it: a thread starting, `bb tree resend`, and **Send down the context** to
+a child already working. An agent task receives the pictures themselves, as
+attachments of its own message, not paths to go and read — an image is copied
+into the thread's project as bb does for anything you attach in the composer,
+because a path into the Trees folder is something the agent's runtime may have
+no way to open.
+
+In the document that travels, each reference becomes a numbered marker —
+`_[Image 1: the login screen]_` — where the image sat, and a line after it
+names them. The Markdown reference itself would be a broken image in a chat
+message, since it is relative to the tree's folder.
+
+A summary cannot carry images: it is text about the document, and nothing in it
+points at one.
 
 ## Handing the context down
 

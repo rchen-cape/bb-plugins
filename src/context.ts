@@ -1,8 +1,10 @@
 import type { ContextMode, Handoff, NodeKind } from "./model.js";
 
 export interface SourceImage {
-  /** The name the file was dropped under, which is its alt text. */
+  /** What the document calls it, which is its alt text. */
   name: string;
+  /** Its place in the prompt's attachment list, marked in the text. */
+  number: number;
   absolutePath: string;
 }
 
@@ -38,15 +40,14 @@ function sourceSection(source: ContextSource, mode: ContextMode): string {
       `### Context from ${source.title} (${source.artifactFile}, full output)`,
       body.length > 0 ? body : NO_ARTIFACT,
       /*
-       * The images arrive as their own prompt parts, after the text. Naming
-       * them here ties each picture to the place in the document that refers
-       * to it, which their order alone would not.
+       * The pictures arrive as attachments, and the document above has a
+       * numbered marker where each one sat, so the two can be lined up.
        */
       ...(source.images.length > 0
         ? [
-            `The images attached to this message are, in order, the ones ${source.artifactFile} refers to: ${source.images
-              .map((image) => image.name)
-              .join(", ")}.`,
+            `The images attached to this message are the ones ${source.artifactFile} refers to: ${source.images
+              .map((image) => `${image.number}, ${image.name}`)
+              .join("; ")}. Each is marked in place above.`,
           ]
         : []),
     ].join("\n\n");

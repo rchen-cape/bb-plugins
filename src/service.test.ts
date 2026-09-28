@@ -45,6 +45,7 @@ interface FakeEnvironment {
 
 interface Fakes {
   files: Map<string, string>;
+  uploads: { projectId: string; filename: string; bytes: number }[];
   directories: Set<string>;
   environments: Map<string, FakeEnvironment>;
   spawns: SpawnRecord[];
@@ -61,6 +62,7 @@ function digest(content: string): string {
 function makeFakes(): Fakes {
   return {
     files: new Map(),
+    uploads: [],
     directories: new Set(),
     environments: new Map(
       (
@@ -112,6 +114,29 @@ function buildSdk(fakes: Fakes) {
       list: async () => [...fakes.environments.values()],
     },
     projects: {
+      attachments: {
+        // Typed as the SDK's own union, which is wider than Trees ever sends.
+        upload: async (args: {
+          projectId: string;
+          clientFile: unknown;
+          filename?: string;
+          mimeType?: string;
+        }) => {
+          const bytes =
+            args.clientFile instanceof Uint8Array
+              ? args.clientFile.byteLength
+              : 0;
+          const filename = args.filename ?? "attachment";
+          fakes.uploads.push({ projectId: args.projectId, filename, bytes });
+          return {
+            type: "localImage" as const,
+            path: `attachments/${args.projectId}/${filename}`,
+            name: filename,
+            mimeType: args.mimeType,
+            sizeBytes: bytes,
+          };
+        },
+      },
       branches: async () => ({
         branches: ["main", "feature/push"],
         remoteBranches: ["origin/main"],
@@ -1340,20 +1365,76 @@ describe("trees service", () => {
       note.artifactPath,
       "# Research\n\nThe flow:\n\n![the login screen](assets/abc123.png)\n",
     );
+    fakes.files.set(`${ROOT}/auth/assets/abc123.png`, "png bytes");
     await call("node_complete", { nodeId: note.id, awaitSummary: true });
 
     const preview = (await call("context_preview", {
       nodeId: child.id,
     })) as unknown as { prompt: string; imagePaths: string[] };
     expect(preview.imagePaths).toEqual([`${ROOT}/auth/assets/abc123.png`]);
-    expect(preview.prompt).toContain("the login screen");
+    // Marked in place rather than left as a reference nothing can resolve.
+    expect(preview.prompt).toContain("_[Image 1: the login screen]_");
+    expect(preview.prompt).not.toContain("assets/abc123.png");
 
     await call("node_start", { nodeId: child.id });
+    /*
+     * Uploaded as an attachment of the thread's project: a path into the
+     * Trees folder is handed to the agent's runtime to read, which it may
+     * not be able to do, and then the picture never arrives.
+     */
+    expect(fakes.uploads).toEqual([
+      { projectId: "proj_personal", filename: "abc123.png", bytes: 9 },
+    ]);
     const spawn = fakes.spawns.at(-1);
     expect(spawn?.input).toEqual([
       expect.objectContaining({ type: "text" }),
-      { type: "localImage", path: `${ROOT}/auth/assets/abc123.png` },
+      { type: "localImage", path: "attachments/proj_personal/abc123.png" },
     ]);
+  });
+
+  /*
+   * The same has to hold for the push: a child already working is the case
+   * where a parent's screenshots matter most, because it read the document
+   * before they were there.
+   */
+  it("attaches the images to the context it pushes to a running child", async () => {
+    const { call } = await loadPlugin(fakes);
+    const project = await createProject(call, "Auth");
+    const note = await createNode(call, {
+      projectId: project.id,
+      title: "Research",
+      kind: "markdown",
+      handoff: "full",
+    });
+    const child = await createNode(call, {
+      projectId: project.id,
+      title: "Spec",
+      kind: "agent",
+      instruction: "Build what the note shows.",
+      dependsOn: [note.id],
+    });
+    fakes.files.set(
+      note.artifactPath,
+      "# Research\n\n![the login screen](assets/abc123.png)\n",
+    );
+    fakes.files.set(`${ROOT}/auth/assets/abc123.png`, "png bytes");
+    await call("node_complete", { nodeId: note.id, awaitSummary: true });
+    await call("node_start", { nodeId: child.id });
+    fakes.uploads.length = 0;
+    const sentBefore = fakes.sent.length;
+
+    const { deliveries } = (await call("node_hand_down", {
+      nodeId: note.id,
+    })) as unknown as { deliveries: { outcome: string }[] };
+
+    expect(deliveries.map((delivery) => delivery.outcome)).toEqual(["sent"]);
+    expect(fakes.uploads).toHaveLength(1);
+    const message = fakes.sent.slice(sentBefore).at(-1);
+    expect(message?.input).toEqual([
+      expect.objectContaining({ type: "text" }),
+      { type: "localImage", path: "attachments/proj_personal/abc123.png" },
+    ]);
+    expect(message?.text).toContain("_[Image 1: the login screen]_");
   });
 
   it("leaves the images behind when only the summary goes down", async () => {

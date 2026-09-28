@@ -58,14 +58,22 @@ describe("assembleContext", () => {
       sources: [
         source({
           images: [
-            { name: "the login screen", absolutePath: "/t/assets/a.png" },
-            { name: "the error state", absolutePath: "/t/assets/b.png" },
+            {
+              name: "the login screen",
+              number: 1,
+              absolutePath: "/t/assets/a.png",
+            },
+            {
+              name: "the error state",
+              number: 2,
+              absolutePath: "/t/assets/b.png",
+            },
           ],
         }),
       ],
     });
     expect(prompt).toContain(
-      "The images attached to this message are, in order, the ones 01_user_research.md refers to: the login screen, the error state.",
+      "The images attached to this message are the ones 01_user_research.md refers to: 1, the login screen; 2, the error state. Each is marked in place above.",
     );
   });
 
@@ -75,7 +83,9 @@ describe("assembleContext", () => {
       mode: "auto_compact",
       sources: [
         source({
-          images: [{ name: "the login screen", absolutePath: "/t/a.png" }],
+          images: [
+            { name: "the login screen", number: 1, absolutePath: "/t/a.png" },
+          ],
         }),
       ],
     });

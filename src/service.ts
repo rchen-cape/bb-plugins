@@ -74,7 +74,7 @@ import {
   assetFileName,
   imageMarkdown,
   imageMimeType,
-  referencedImages,
+  withImageMarkers,
 } from "./images.js";
 
 export class TreeError extends Error {}
@@ -762,6 +762,7 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
         ? node.contextIncludes.filter((sourceId) => ancestors.has(sourceId))
         : parentIdsOf(graph, node.id);
     const sources: ContextSource[] = [];
+    let imageCount = 0;
     for (const sourceId of sourceIds) {
       const source = rows.get(sourceId);
       if (source === undefined) continue;
@@ -773,23 +774,27 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
       /*
        * Only a document that is sent brings its pictures, which follows from
        * the read above: a summary leaves the artifact empty, and a summary is
-       * text about the document that points at no image of its own.
+       * text about the document that points at no image of its own. The
+       * numbering runs across every document in the prompt, because the
+       * attachments arrive as one list.
        */
-      const images = referencedImages(artifact).map((image) => ({
-        name: image.alt,
-        absolutePath: assetPath({
-          directory: project.directory,
-          assetFile: image.assetFile,
-        }),
-      }));
+      const marked = withImageMarkers(artifact, imageCount);
+      imageCount += marked.images.length;
       sources.push({
         nodeId: source.id,
         title: source.title,
         artifactFile: source.artifactFile,
         summary: source.summary,
-        artifact,
+        artifact: marked.text,
         handoff: source.handoff,
-        images,
+        images: marked.images.map((image) => ({
+          name: image.alt,
+          number: image.number,
+          absolutePath: assetPath({
+            directory: project.directory,
+            assetFile: image.assetFile,
+          }),
+        })),
       });
     }
     return {
@@ -831,16 +836,55 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
 
   /*
    * The prompt is the text plus a part per image, in the order the documents
-   * refer to them, which is the order the text says they arrive in.
+   * refer to them, which is the order the text's markers give.
+   *
+   * An image is uploaded as an attachment of the thread's own project rather
+   * than pointed at where it sits in the Trees folder. A path outside the
+   * workspace is passed through to the agent's runtime untouched, which then
+   * has to be able to read it — a different machine, or a sandbox, and the
+   * picture silently never arrives. An attachment is bytes bb already holds.
    */
-  function promptInput(preview: ContextPreview): PromptInput[] {
-    return [
-      { type: "text" as const, text: preview.prompt, mentions: [] },
-      ...preview.imagePaths.map((path) => ({
-        type: "localImage" as const,
-        path,
-      })),
+  async function promptInput(args: {
+    preview: ContextPreview;
+    projectId: string;
+  }): Promise<PromptInput[]> {
+    const parts: PromptInput[] = [
+      { type: "text", text: args.preview.prompt, mentions: [] },
     ];
+    for (const path of args.preview.imagePaths) {
+      parts.push(await attachImageToProject(args.projectId, path));
+    }
+    return parts;
+  }
+
+  async function attachImageToProject(
+    projectId: string,
+    path: string,
+  ): Promise<PromptInput> {
+    const name = path.split("/").at(-1) ?? path;
+    const mimeType = imageMimeType(name);
+    if (mimeType === null) {
+      throw new TreeError(`${name} is not an image Trees can send.`);
+    }
+    try {
+      const file = await bb.sdk.files.read({ path });
+      if ("notModified" in file) throw new Error("it could not be read");
+      const bytes =
+        file.contentEncoding === "base64"
+          ? Buffer.from(file.content, "base64")
+          : Buffer.from(file.content, "utf8");
+      const uploaded = await bb.sdk.projects.attachments.upload({
+        projectId,
+        clientFile: new Uint8Array(bytes),
+        filename: name,
+        mimeType,
+      });
+      return { type: "localImage", path: uploaded.path };
+    } catch (error) {
+      throw new TreeError(
+        `The image ${name} could not be attached: ${errorText(error)}`,
+      );
+    }
   }
 
   function recordCompletion(args: {
@@ -1391,7 +1435,10 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
         await bb.sdk.threads.spawn({
           projectId: placement.projectId,
           environment: placement.environment,
-          input: promptInput(preview),
+          input: await promptInput({
+            preview,
+            projectId: placement.projectId,
+          }),
           title: node.title,
           pluginMetadata: {
             treeProjectId: node.projectId,
@@ -1421,7 +1468,10 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
       await bb.sdk.threads.send({
         threadId: node.threadId,
         mode: "auto",
-        input: promptInput(preview),
+        input: await promptInput({
+          preview,
+          projectId: (await nodePlacement(node)).projectId,
+        }),
       });
       const now = Date.now();
       updateNodeRow(db, { nodeId: node.id, now, completion: "working" });
@@ -1468,9 +1518,12 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
           await bb.sdk.threads.send({
             threadId: child.threadId,
             mode: "auto",
-            input: promptInput({
-              ...preview,
-              prompt: additionalContextPrompt({ context: preview.prompt }),
+            input: await promptInput({
+              preview: {
+                ...preview,
+                prompt: additionalContextPrompt({ context: preview.prompt }),
+              },
+              projectId: (await nodePlacement(child)).projectId,
             }),
           });
           deliveries.push({

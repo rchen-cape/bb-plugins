@@ -120,3 +120,46 @@ export function withResolvedAssetUrls(
     },
   );
 }
+
+export interface MarkedImage extends ReferencedImage {
+  /** Its place in the attachment list, counted across every document sent. */
+  number: number;
+}
+
+/*
+ * A document travelling to a thread keeps its images in place, but not as
+ * Markdown: the reference is relative to the tree's folder, which resolves to
+ * nothing in a chat message and renders as a broken image. Each becomes a
+ * numbered marker instead, tying the spot in the text to the picture attached
+ * to the same message.
+ */
+export function withImageMarkers(
+  markdown: string,
+  startNumber: number,
+): { text: string; images: MarkedImage[] } {
+  const images: MarkedImage[] = [];
+  const text = markdown.replace(
+    new RegExp(
+      `!\\[([^\\]]*)\\]\\(\\s*(?:\\./)?${ASSETS_DIRECTORY}/([^)\\s]+)\\s*\\)`,
+      "gu",
+    ),
+    (whole, rawAlt: string, file: string) => {
+      const assetFile = decodeURIComponent(file);
+      if (imageMimeType(assetFile) === null) return whole;
+      if (assetFile.includes("/") || assetFile.includes("\\")) return whole;
+      const known = images.find((image) => image.assetFile === assetFile);
+      if (known !== undefined) {
+        return `_[Image ${known.number}: ${known.alt}]_`;
+      }
+      const alt = rawAlt.trim();
+      const image: MarkedImage = {
+        assetFile,
+        alt: alt.length > 0 ? alt : assetFile,
+        number: startNumber + images.length + 1,
+      };
+      images.push(image);
+      return `_[Image ${image.number}: ${image.alt}]_`;
+    },
+  );
+  return { text, images };
+}

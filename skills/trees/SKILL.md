@@ -120,8 +120,8 @@ handoff, set with `bb tree node update <task> --handoff <mode>`:
   overwrites it.
 - `full` — downstream tasks receive the whole Markdown file, however little
   they asked for, and no summary is written at all. This is the only handoff
-  that carries a note's images: they arrive as image parts of the prompt,
-  after the text that names them.
+  that carries a note's images: each is attached to the message the child
+  receives, and the document marks where it sat as `_[Image 1: alt text]_`.
 
 The producer wins: a `full` parent sends its document even to a child on
 `auto_compact`. Only `summary` costs a model call on completion.
@@ -151,7 +151,11 @@ Children normally pull their context: it is assembled when each one starts.
 
 One unreachable child does not stop the others; each reports its own outcome.
 Handing down does not change any child's state — use `bb tree reopen` or
-`bb tree working` for that.
+`bb tree working` for that. A parent sending its whole document sends its
+images too, attached to the message.
+
+An image that cannot be attached fails that child's delivery rather than
+arriving as text about a picture nobody was shown.
 
 ## Stale tasks
 
