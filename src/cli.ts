@@ -122,10 +122,19 @@ function parseHandoff(args: ParsedArgv): Handoff | undefined {
   return parsed.data;
 }
 
+/** `--branch=` with nothing after it clears the branch a task works on. */
+function parseBranch(args: ParsedArgv): string | null | undefined {
+  const raw = args.options.get("branch");
+  if (raw === undefined) return undefined;
+  return raw.trim().length === 0 ? null : raw.trim();
+}
+
 const USAGE = [
   "bb tree ready [--project <project>]",
   "bb tree project list|create|show|rename|delete",
-  "bb tree node list|show|create|update|move|delete [--handoff summary|custom|full]",
+  "bb tree node list|show|create|update|move|delete",
+  "                [--workspace <proj-id>|<path>] [--branch <name>]",
+  "                [--handoff summary|custom|full]",
   "bb tree dep add|remove --parent <node> --child <node>",
   "bb tree context <node>",
   "bb tree artifact read|write <node>",
@@ -145,15 +154,15 @@ export const TREE_CLI_COMMANDS = [
     name: "project",
     summary: "Manage tree projects and the folder each one writes to.",
     usage:
-      "bb tree project list|create|show|rename|delete|attach|reveal " +
+      "bb tree project list|create|show|rename|delete|reveal " +
       "[<project>] " +
-      "[--name <name>] [--bb-project <proj-id>] [--json]",
+      "[--name <name>] [--json]",
   },
   {
     name: "node",
     summary: "Create, inspect, and edit the tasks in a tree.",
     usage:
-      "bb tree node list|show|create|update|move|delete [<node>] [--project <project>] [--title <title>] [--kind markdown|agent] [--instruction <text>] [--context-mode auto_compact|full_parents|custom] [--brief <text>] [--depends-on <node>] [--include <node>] [--workspace scratch|<bb project id>|<absolute path>] [--x <px> --y <px>] [--json]",
+      "bb tree node list|show|create|update|move|delete [<node>] [--project <project>] [--title <title>] [--kind markdown|agent] [--instruction <text>] [--context-mode auto_compact|full_parents|custom] [--brief <text>] [--depends-on <node>] [--include <node>] [--workspace scratch|<bb project id>|<absolute path>] [--branch <name>] [--x <px> --y <px>] [--json]",
   },
   {
     name: "dep",
@@ -262,6 +271,9 @@ function nodeLine(node: TreeNode): string {
   }
   if (node.kind === "agent") {
     parts.push(`    workspace: ${describeWorkspace(node.workspace)}`);
+    if (node.baseBranch !== null) {
+      parts.push(`    branch: ${node.baseBranch}`);
+    }
     if (node.threadId !== null) parts.push(`    thread: ${node.threadId}`);
   }
   if (node.summary.length > 0) parts.push(`    summary: ${node.summary}`);
@@ -441,23 +453,9 @@ export function createTreeCli(deps: TreeCliDeps) {
         text: `Opened ${directory}.`,
       });
     }
-    if (action === "attach") {
-      const project = resolveProject(requirePositional(args, 2, "A project"));
-      const attached = await service.setBbProject({
-        projectId: project.id,
-        bbProjectId: requireOption(args, "bb-project"),
-      });
-      return result({
-        json,
-        payload: { project: attached },
-        text: projectLine(attached),
-      });
-    }
     if (action === "create") {
-      const bbProject = args.options.get("bb-project");
       const project = await service.createProject({
         name: requireOption(args, "name"),
-        ...(bbProject === undefined ? {} : { bbProjectId: bbProject }),
       });
       return result({ json, payload: { project }, text: projectLine(project) });
     }
@@ -541,6 +539,7 @@ export function createTreeCli(deps: TreeCliDeps) {
       );
       const position = optionalPosition(args);
       const createHandoff = parseHandoff(args);
+      const createBranch = parseBranch(args);
       const node = await service.createNode({
         projectId: resolveProject(projectRef).id,
         title: requireOption(args, "title"),
@@ -556,6 +555,7 @@ export function createTreeCli(deps: TreeCliDeps) {
         ...(workspaceRaw === undefined
           ? {}
           : { workspace: parseWorkspace(workspaceRaw) }),
+        ...(createBranch === undefined ? {} : { baseBranch: createBranch }),
         ...(position === null ? {} : { position }),
         dependsOn,
       });
@@ -588,6 +588,7 @@ export function createTreeCli(deps: TreeCliDeps) {
           )
         : undefined;
       const updateHandoff = parseHandoff(args);
+      const updateBranch = parseBranch(args);
       const node = service.updateNode({
         nodeId: target.id,
         ...(args.options.get("title") === undefined
@@ -604,6 +605,7 @@ export function createTreeCli(deps: TreeCliDeps) {
         ...(workspaceRaw === undefined
           ? {}
           : { workspace: parseWorkspace(workspaceRaw) }),
+        ...(updateBranch === undefined ? {} : { baseBranch: updateBranch }),
         ...(includes === undefined ? {} : { contextIncludes: includes }),
       });
       return result({ json, payload: { node }, text: nodeLine(node) });

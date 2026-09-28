@@ -74,13 +74,18 @@ export const migrations = [
   `ALTER TABLE tree_nodes ADD COLUMN summary_problem TEXT;`,
   `ALTER TABLE tree_nodes
      ADD COLUMN handoff TEXT NOT NULL DEFAULT 'summary';`,
+  `ALTER TABLE tree_nodes ADD COLUMN base_branch TEXT;`,
+  /*
+   * A tree spans projects now: each agent task names the project and branch
+   * it works in, so the tree's single reference has nothing left to decide.
+   */
+  `ALTER TABLE tree_projects DROP COLUMN bb_project_id;`,
 ];
 
 export interface ProjectRow {
   id: string;
   name: string;
   directory: string;
-  bbProjectId: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -103,6 +108,8 @@ export interface NodeRow {
   handoff: Handoff;
   customBrief: string;
   workspace: WorkspaceTarget;
+  /** The branch an agent task's worktree is cut from; null until chosen. */
+  baseBranch: string | null;
   threadId: string | null;
   x: number;
   y: number;
@@ -117,7 +124,6 @@ export interface EdgeRow {
 }
 
 const PROJECT_COLUMNS = `id, name, directory,
-  bb_project_id AS bbProjectId,
   created_at AS createdAt, updated_at AS updatedAt`;
 
 const NODE_COLUMNS = `id, project_id AS projectId, ordinal, title, kind,
@@ -127,6 +133,7 @@ const NODE_COLUMNS = `id, project_id AS projectId, ordinal, title, kind,
   instruction, context_mode AS contextMode, handoff,
   custom_brief AS customBrief,
   workspace_kind AS workspaceKind, workspace_ref AS workspaceRef,
+  base_branch AS baseBranch,
   thread_id AS threadId, x, y,
   created_at AS createdAt, updated_at AS updatedAt`;
 
@@ -225,6 +232,7 @@ function decodeNodeRow(value: unknown, contextIncludes: string[]): NodeRow {
     handoff: handoffSchema.parse(raw.handoff),
     customBrief: raw.customBrief,
     workspace: decodeWorkspace(raw),
+    baseBranch: raw.baseBranch,
     threadId: raw.threadId,
     x: raw.x,
     y: raw.y,
@@ -239,16 +247,15 @@ export function insertProject(
   args: {
     name: string;
     directory: string;
-    bbProjectId: string | null;
     now: number;
   },
 ): ProjectRow {
   const id = createProjectId();
   db.prepare(
     `INSERT INTO tree_projects
-       (id, name, directory, bb_project_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(id, args.name, args.directory, args.bbProjectId, args.now, args.now);
+       (id, name, directory, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(id, args.name, args.directory, args.now, args.now);
   const project = getProject(db, id);
   if (project === null) throw new DataError("The project was not stored.");
   return project;
@@ -277,15 +284,6 @@ export function findProjectByDirectory(
     .prepare(`SELECT ${PROJECT_COLUMNS} FROM tree_projects WHERE directory = ?`)
     .get(directory);
   return row === undefined ? null : (row as ProjectRow);
-}
-
-export function setProjectBbProject(
-  db: Db,
-  args: { projectId: string; bbProjectId: string; now: number },
-): void {
-  db.prepare(
-    `UPDATE tree_projects SET bb_project_id = ?, updated_at = ? WHERE id = ?`,
-  ).run(args.bbProjectId, args.now, args.projectId);
 }
 
 export function renameProject(
@@ -400,6 +398,7 @@ export interface InsertNodeArgs {
   handoff: Handoff;
   customBrief: string;
   workspace: WorkspaceTarget;
+  baseBranch: string | null;
   x: number;
   y: number;
   now: number;
@@ -412,9 +411,9 @@ export function insertNode(db: Db, args: InsertNodeArgs): string {
     `INSERT INTO tree_nodes (
        id, project_id, ordinal, title, kind, completion, artifact_file,
        instruction, context_mode, handoff, custom_brief,
-       workspace_kind, workspace_ref,
+       workspace_kind, workspace_ref, base_branch,
        x, y, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     args.projectId,
@@ -428,6 +427,7 @@ export function insertNode(db: Db, args: InsertNodeArgs): string {
     args.customBrief,
     workspace.kind,
     workspace.ref,
+    args.baseBranch,
     args.x,
     args.y,
     args.now,
@@ -445,6 +445,7 @@ export interface UpdateNodeArgs {
   handoff?: Handoff;
   customBrief?: string;
   workspace?: WorkspaceTarget;
+  baseBranch?: string | null;
   summary?: string;
   summaryStatus?: SummaryStatus;
   summaryProblem?: string | null;
@@ -473,6 +474,7 @@ export function updateNode(db: Db, args: UpdateNodeArgs): void {
     set("workspace_kind", workspace.kind);
     set("workspace_ref", workspace.ref);
   }
+  if (args.baseBranch !== undefined) set("base_branch", args.baseBranch);
   if (args.summary !== undefined) set("summary", args.summary);
   if (args.summaryStatus !== undefined) {
     set("summary_status", args.summaryStatus);

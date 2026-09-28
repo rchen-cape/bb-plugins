@@ -537,6 +537,76 @@ describe("bb tree", () => {
     expect(childless.stdout).toContain("no tasks depending on it");
   });
 
+  /*
+   * The project and branch belong to the task, so both are settable where
+   * every other task field is — not once, at the tree.
+   */
+  it("sets a task's project and branch, and clears the branch again", async () => {
+    const host = await loadPlugin(fakes);
+    await runJson(host, ["project", "create", "--name", "Auth"]);
+    const created = await runJson<{ node: TreeNode }>(host, [
+      "node",
+      "create",
+      "--project",
+      "Auth",
+      "--title",
+      "Add the endpoint",
+      "--kind",
+      "agent",
+      "--workspace",
+      "proj_api",
+      "--branch",
+      "feature/push",
+    ]);
+    expect(created.node.workspace).toEqual({
+      kind: "project",
+      projectId: "proj_api",
+    });
+    expect(created.node.baseBranch).toBe("feature/push");
+
+    const moved = await runJson<{ node: TreeNode }>(host, [
+      "node",
+      "update",
+      "Add the endpoint",
+      "--branch",
+      "main",
+    ]);
+    expect(moved.node.baseBranch).toBe("main");
+
+    const cleared = await runJson<{ node: TreeNode }>(host, [
+      "node",
+      "update",
+      "Add the endpoint",
+      "--branch=",
+    ]);
+    expect(cleared.node.baseBranch).toBeNull();
+  });
+
+  it("refuses a branch on a task with no project to branch from", async () => {
+    const host = await loadPlugin(fakes);
+    await runJson(host, ["project", "create", "--name", "Auth"]);
+    await runJson(host, [
+      "node",
+      "create",
+      "--project",
+      "Auth",
+      "--title",
+      "Think about it",
+      "--kind",
+      "agent",
+    ]);
+
+    const refused = await run(host, [
+      "node",
+      "update",
+      "Think about it",
+      "--branch",
+      "main",
+    ]);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr).toContain("Choose the project this task works in");
+  });
+
   it("attaches an image to a note and lists what it carries", async () => {
     const host = await loadPlugin(fakes);
     await runJson(host, ["project", "create", "--name", "Auth"]);

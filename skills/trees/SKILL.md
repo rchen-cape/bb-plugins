@@ -36,7 +36,7 @@ title.
 | Command                                                         | Purpose                                                                                                                                                                                                      |
 | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `bb tree ready [--project <tree>]`                              | Every task whose dependencies are satisfied, across all trees or in one. Start here.                                                                                                                         |
-| `bb tree project list\|create\|show\|rename\|delete\|attach`    | Manage trees. `--bb-project <proj-id>` points the tree at the project its agent tasks get worktrees from; the tree's files stay in the Trees folder.                                                         |
+| `bb tree project list\|create\|show\|rename\|delete`            | Manage trees. A tree belongs to no bb project: its files stay in the Trees folder and each agent task names the project it works in.                                                                         |
 | `bb tree node list\|show\|create\|update\|move\|delete`         | Manage the tasks in a tree. `--x`/`--y` on `create` and `move` set a task's place on the canvas; `--handoff summary\|custom\|full` sets what it passes downstream.                                           |
 | `bb tree dep add\|remove --parent <task> --child <task>`        | Wire or unwire a dependency. Loops are refused.                                                                                                                                                              |
 | `bb tree context <task>`                                        | Print the exact context an agent task will receive.                                                                                                                                                          |
@@ -58,7 +58,7 @@ title.
 ## Creating a plan as a tree
 
 ```sh
-bb tree project create --name "Build auth feature" --bb-project proj_your_api
+bb tree project create --name "Build auth feature"
 bb tree node create --project "Build auth feature" \
   --title "Write auth requirements" --kind markdown
 bb tree node create --project "Build auth feature" \
@@ -69,7 +69,7 @@ bb tree node create --project "Build auth feature" \
   --title "Generate Express middleware" --kind agent \
   --instruction "Implement the middleware the schema describes." \
   --depends-on "Generate API design specs" \
-  --workspace proj_your_api_project
+  --workspace proj_your_api --branch main
 ```
 
 Keep each task atomic: one decision, one document, or one change. A task whose
@@ -78,13 +78,19 @@ work can start as soon as the part it needs is done.
 
 ## Where an agent task runs
 
+A tree belongs to no project. Each agent task names the project it works in and
+the branch its worktree is cut from, so tasks in one tree can change different
+repositories.
+
 By default an agent task runs in a bb-managed scratch workspace: its context
 arrives in the prompt and its deliverable is its final message, so it needs no
 repository. For work on real code:
 
-- `--workspace <proj_id>` runs the task through that project's own environment,
-  so it gets **its own** workspace — a fresh worktree when the project is set up
-  for one. Two tasks pointed at the same project do not share a checkout.
+- `--workspace <proj_id>` gives the task its own fresh worktree in that
+  project. Two tasks pointed at the same project do not share a checkout.
+- `--branch <name>` is the branch that worktree is cut from; `--branch=` clears
+  it and leaves the project's default. A branch cannot be set before a project,
+  since there would be nothing to branch from.
 - `--workspace <env_id>` runs the task in that exact existing environment, which
   it then **shares** with every other task pointed at it. Use this when a later
   task must continue the earlier task's work in place.
@@ -92,7 +98,9 @@ repository. For work on real code:
   refuses a directory no project owns.
 
 List candidates with `bb env list` and read a task's current choice from
-`bb tree node show <task>`.
+`bb tree node show <task>`, which prints its workspace and branch. Changing the
+branch of a task that already has a thread applies the next time it starts; it
+does not move the worktree it has.
 
 ## Context modes
 

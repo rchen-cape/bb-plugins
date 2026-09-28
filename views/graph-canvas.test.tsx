@@ -25,6 +25,7 @@ function node(overrides: Partial<TreeNode>): TreeNode {
     instruction: "",
     contextMode: "auto_compact",
     handoff: "summary",
+    baseBranch: null,
     customBrief: "",
     contextIncludes: [],
     workspace: { kind: "tree" },

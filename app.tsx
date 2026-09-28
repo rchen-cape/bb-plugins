@@ -130,7 +130,6 @@ function Toolbar({ children }: { children: React.ReactNode }) {
 
 function ProjectIndex({
   projects,
-  bbProjects,
   error,
   busy,
   onOpen,
@@ -139,39 +138,29 @@ function ProjectIndex({
   onReveal,
 }: {
   projects: readonly TreeProject[] | null;
-  bbProjects: readonly { id: string; name: string }[];
   error: string | null;
   busy: boolean;
   onOpen: (projectId: string) => void;
-  onCreate: (args: { name: string; bbProjectId: string }) => void;
+  onCreate: (args: { name: string }) => void;
   onOpenReady: () => void;
   onReveal: (projectId: string) => void;
 }) {
   const [name, setName] = useState("");
-  const [bbProjectId, setBbProjectId] = useState("");
-  const chosenProject =
-    bbProjectId === "" ? (bbProjects[0]?.id ?? "") : bbProjectId;
   return (
     <div className="h-full overflow-y-auto p-4 md:p-5">
       <div className="mx-auto w-full max-w-3xl space-y-4">
-        <div className="space-y-1">
-          <p className="text-sm text-muted-foreground">
-            A tree keeps its Markdown in the Trees folder and references a bb
-            project, which is where its agent tasks get their worktrees.
-          </p>
-          {bbProjects.length === 0 ? (
-            <p className="text-sm text-destructive" role="alert">
-              Add a bb project first so agent tasks have somewhere to run.
-            </p>
-          ) : null}
-        </div>
+        <p className="text-sm text-muted-foreground">
+          A tree keeps its Markdown in the Trees folder. It belongs to no
+          project: each agent task picks the project and branch it works in, so
+          one tree can change several repositories.
+        </p>
         <form
           className="flex flex-wrap items-center gap-2"
           onSubmit={(event) => {
             event.preventDefault();
             const next = name.trim();
-            if (next.length === 0 || chosenProject === "") return;
-            onCreate({ name: next, bbProjectId: chosenProject });
+            if (next.length === 0) return;
+            onCreate({ name: next });
             setName("");
           }}
         >
@@ -183,24 +172,10 @@ function ProjectIndex({
             disabled={busy}
             onChange={(event) => setName(event.target.value)}
           />
-          <select
-            aria-label="bb project"
-            className="h-9 max-w-56 rounded-md border border-input bg-background px-2 text-sm text-foreground"
-            value={chosenProject}
-            disabled={busy || bbProjects.length === 0}
-            onChange={(event) => setBbProjectId(event.target.value)}
-          >
-            <option value="">Project it belongs to…</option>
-            {bbProjects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
-              </option>
-            ))}
-          </select>
           <Button
             type="submit"
             size="sm"
-            disabled={busy || name.trim().length === 0 || chosenProject === ""}
+            disabled={busy || name.trim().length === 0}
           >
             New tree
           </Button>
@@ -505,24 +480,25 @@ function TreesPanel({ subPath }: PluginNavPanelProps) {
       return client.call("assets_preview", { projectId });
     },
   );
-  const needsBranches =
-    selectedNodeId !== null &&
-    (graphQuery.data?.nodes ?? []).some(
-      (node) =>
-        node.id === selectedNodeId &&
-        node.kind === "agent" &&
-        node.threadId === null,
-    );
+  /*
+   * Branches come from the project the open task works in — each task names
+   * its own, so there is no tree-wide answer to ask for.
+   */
+  const selectedWorkspace = (graphQuery.data?.nodes ?? []).find(
+    (node) => node.id === selectedNodeId && node.kind === "agent",
+  )?.workspace;
+  const selectedWorkspaceProjectId =
+    selectedWorkspace?.kind === "project" ? selectedWorkspace.projectId : null;
   const branchQuery = useTreesQuery(
-    route.projectId === null || !needsBranches
+    selectedWorkspaceProjectId === null
       ? null
-      : `branches:${route.projectId}`,
+      : `branches:${selectedWorkspaceProjectId}`,
     (client) => {
-      const projectId = route.projectId;
-      if (projectId === null) {
-        return Promise.reject(new Error("No tree is open."));
+      const bbProjectId = selectedWorkspaceProjectId;
+      if (bbProjectId === null) {
+        return Promise.reject(new Error("This task has no project yet."));
       }
-      return client.call("base_branches", { projectId });
+      return client.call("base_branches", { bbProjectId });
     },
   );
 
@@ -695,7 +671,6 @@ function TreesPanel({ subPath }: PluginNavPanelProps) {
     return (
       <ProjectIndex
         projects={projectsQuery.data}
-        bbProjects={workspaceQuery.data?.projects ?? []}
         error={projectsQuery.error}
         busy={busyAction !== null}
         onOpen={(projectId) => goToPanel(projectId)}
@@ -708,12 +683,9 @@ function TreesPanel({ subPath }: PluginNavPanelProps) {
             toast.success(`Opened ${directory}.`);
           })
         }
-        onCreate={({ name, bbProjectId }) =>
+        onCreate={({ name }) =>
           perform("create-project", async () => {
-            const { project } = await rpc.call("projects_create", {
-              name,
-              bbProjectId,
-            });
+            const { project } = await rpc.call("projects_create", { name });
             projectsQuery.reload();
             goToPanel(project.id);
           })
@@ -808,7 +780,6 @@ function TreesPanel({ subPath }: PluginNavPanelProps) {
               projectNodes={nodes}
               bbProjects={workspaceQuery.data?.projects ?? []}
               sharedEnvironments={workspaceQuery.data?.environments ?? []}
-              treeBbProjectId={graph?.project.bbProjectId ?? null}
               branches={branchQuery.data?.branches ?? []}
               defaultBranch={branchQuery.data?.defaultBranch ?? null}
               branchProblem={branchQuery.error}
@@ -818,16 +789,6 @@ function TreesPanel({ subPath }: PluginNavPanelProps) {
                     nodeId: selectedNode.id,
                     baseBranch,
                     prompt,
-                  });
-                  graphQuery.reload();
-                  projectsQuery.reload();
-                })
-              }
-              onAttachBbProject={(bbProjectId) =>
-                perform("attach", async () => {
-                  await rpc.call("projects_set_bb_project", {
-                    projectId,
-                    bbProjectId,
                   });
                   graphQuery.reload();
                   projectsQuery.reload();

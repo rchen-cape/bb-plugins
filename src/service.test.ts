@@ -669,15 +669,18 @@ describe("trees service", () => {
     expect(spawn?.environment).toEqual({ type: "project-default" });
   });
 
-  it("keeps a tree's files in the Trees folder, not in its bb project", async () => {
+  /*
+   * A tree belongs to no project: its files live in the Trees folder, and
+   * which repository gets changed is each agent task's own business.
+   */
+  it("keeps a tree's files in the Trees folder and names no project", async () => {
     const { call } = await loadPlugin(fakes);
     const created = (await call("projects_create", {
       name: "Auth",
-      bbProjectId: "proj_api",
     })) as unknown as { project: TreeProject };
 
     expect(created.project.directory).toBe(`${ROOT}/auth`);
-    expect(created.project.bbProjectId).toBe("proj_api");
+    expect(created.project).not.toHaveProperty("bbProjectId");
     expect(fakes.directories.has(`${ROOT}/auth`)).toBe(true);
     expect(
       [...fakes.directories].some((path) =>
@@ -686,21 +689,10 @@ describe("trees service", () => {
     ).toBe(false);
   });
 
-  it("stores a tree with no bb project in the Trees folder too", async () => {
-    const { call } = await loadPlugin(fakes);
-    const created = (await call("projects_create", {
-      name: "Auth",
-    })) as unknown as { project: TreeProject };
-
-    expect(created.project.directory).toBe(`${ROOT}/auth`);
-    expect(created.project.bbProjectId).toBeNull();
-  });
-
   it("creates an agent task without a thread until it is started", async () => {
     const { call } = await loadPlugin(fakes);
     const created = (await call("projects_create", {
       name: "Auth",
-      bbProjectId: "proj_api",
     })) as unknown as { project: TreeProject };
     const task = await createNode(call, {
       projectId: created.project.id,
@@ -714,16 +706,14 @@ describe("trees service", () => {
     expect(fakes.spawns).toHaveLength(0);
   });
 
-  it("opens a thread for an existing agent task with its first message", async () => {
+  it("opens a thread in the task's own project, off the branch it names", async () => {
     const { call } = await loadPlugin(fakes);
-    const created = (await call("projects_create", {
-      name: "Auth",
-      bbProjectId: "proj_api",
-    })) as unknown as { project: TreeProject };
+    const project = await createProject(call, "Auth");
     const task = await createNode(call, {
-      projectId: created.project.id,
+      projectId: project.id,
       title: "Implement middleware",
       kind: "agent",
+      workspace: { kind: "project", projectId: "proj_api" },
     });
     expect(task.threadId).toBeNull();
 
@@ -734,7 +724,10 @@ describe("trees service", () => {
     })) as unknown as { node: TreeNode };
 
     expect(opened.node.threadId).not.toBeNull();
+    // The branch it opened on is remembered, not just used and forgotten.
+    expect(opened.node.baseBranch).toBe("main");
     const spawn = fakes.spawns.at(-1);
+    expect(spawn?.projectId).toBe("proj_api");
     expect(spawn?.prompt).toContain("Start with the router.");
     expect(spawn?.environment).toEqual({
       type: "host",
@@ -746,30 +739,85 @@ describe("trees service", () => {
     });
   });
 
-  it("offers the bb project's branches to start a worktree from", async () => {
+  /*
+   * One tree, two tasks, two repositories: the whole point of taking the
+   * project off the tree and putting it on the task.
+   */
+  it("runs two tasks in one tree against different projects and branches", async () => {
     const { call } = await loadPlugin(fakes);
-    const created = (await call("projects_create", {
-      name: "Auth",
-      bbProjectId: "proj_api",
-    })) as unknown as { project: TreeProject };
+    const project = await createProject(call, "Auth");
+    const api = await createNode(call, {
+      projectId: project.id,
+      title: "Add the endpoint",
+      kind: "agent",
+      instruction: "Add it.",
+      workspace: { kind: "project", projectId: "proj_api" },
+      baseBranch: "feature/push",
+    });
+    const personal = await createNode(call, {
+      projectId: project.id,
+      title: "Note it in the changelog",
+      kind: "agent",
+      instruction: "Write it.",
+      workspace: { kind: "project", projectId: "proj_personal" },
+      baseBranch: "main",
+    });
 
+    await call("node_start", { nodeId: api.id });
+    const first = fakes.spawns.at(-1);
+    await call("node_start", { nodeId: personal.id });
+    const second = fakes.spawns.at(-1);
+
+    expect(first?.projectId).toBe("proj_api");
+    expect(first?.environment).toEqual({
+      type: "host",
+      hostId: "host_1",
+      workspace: {
+        type: "managed-worktree",
+        baseBranch: { kind: "named", name: "feature/push" },
+      },
+    });
+    expect(second?.projectId).toBe("proj_personal");
+    expect(second?.environment).toEqual({
+      type: "host",
+      hostId: "host_1",
+      workspace: {
+        type: "managed-worktree",
+        baseBranch: { kind: "named", name: "main" },
+      },
+    });
+  });
+
+  it("offers the branches of the project a task names", async () => {
+    const { call } = await loadPlugin(fakes);
     const options = (await call("base_branches", {
-      projectId: created.project.id,
+      bbProjectId: "proj_api",
     })) as unknown as { branches: string[]; defaultBranch: string | null };
 
     expect(options.branches).toEqual(["main", "feature/push", "origin/main"]);
     expect(options.defaultBranch).toBe("main");
   });
 
-  it("refuses branches for a tree with no bb project", async () => {
+  it("names an unknown project rather than listing nothing", async () => {
     const { call } = await loadPlugin(fakes);
-    const created = (await call("projects_create", {
-      name: "Auth",
-    })) as unknown as { project: TreeProject };
+    await expect(
+      call("base_branches", { bbProjectId: "proj_missing" }),
+    ).rejects.toThrow(/No bb project has the id proj_missing/u);
+  });
+
+  it("refuses a branch for a task with no project to branch from", async () => {
+    const { call } = await loadPlugin(fakes);
+    const project = await createProject(call, "Auth");
+    const task = await createNode(call, {
+      projectId: project.id,
+      title: "Implement middleware",
+      kind: "agent",
+      instruction: "Go.",
+    });
 
     await expect(
-      call("base_branches", { projectId: created.project.id }),
-    ).rejects.toThrow(/not associated with a bb project/u);
+      call("node_update", { nodeId: task.id, baseBranch: "main" }),
+    ).rejects.toThrow(/Choose the project this task works in/u);
   });
 
   it("marks a task done before its summary is generated", async () => {

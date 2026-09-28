@@ -29,26 +29,12 @@ export const treesRpcContract = defineRpcContract({
     output: z.object({ projects: z.array(treeProjectSchema) }).strict(),
   },
   projects_create: {
-    input: z
-      .object({
-        name: z.string().min(1),
-        bbProjectId: z.string().min(1).nullable().optional(),
-      })
-      .strict(),
+    input: z.object({ name: z.string().min(1) }).strict(),
     output: projectResultSchema,
   },
   project_reveal: {
     input: z.object({ projectId: z.string().min(1) }).strict(),
     output: z.object({ directory: z.string() }).strict(),
-  },
-  projects_set_bb_project: {
-    input: z
-      .object({
-        projectId: z.string().min(1),
-        bbProjectId: z.string().min(1),
-      })
-      .strict(),
-    output: projectResultSchema,
   },
   node_open_thread: {
     input: z
@@ -61,7 +47,7 @@ export const treesRpcContract = defineRpcContract({
     output: nodeResultSchema,
   },
   base_branches: {
-    input: z.object({ projectId: z.string().min(1) }).strict(),
+    input: z.object({ bbProjectId: z.string().min(1) }).strict(),
     output: z
       .object({
         branches: z.array(z.string()),
@@ -106,6 +92,7 @@ export const treesRpcContract = defineRpcContract({
         handoff: handoffSchema.optional(),
         customBrief: z.string().optional(),
         workspace: workspaceTargetSchema.optional(),
+        baseBranch: z.string().min(1).nullable().optional(),
         dependsOn: z.array(z.string().min(1)).optional(),
       })
       .strict(),
@@ -121,6 +108,7 @@ export const treesRpcContract = defineRpcContract({
         handoff: handoffSchema.optional(),
         customBrief: z.string().optional(),
         workspace: workspaceTargetSchema.optional(),
+        baseBranch: z.string().min(1).nullable().optional(),
         contextIncludes: z.array(z.string().min(1)).optional(),
       })
       .strict(),
@@ -304,9 +292,6 @@ export function createRpcHandlers(args: {
     base_branches: (input) => service.listBaseBranches(input),
     project_reveal: async (input) => ({
       directory: await service.revealDirectory(input),
-    }),
-    projects_set_bb_project: async (input) => ({
-      project: await service.setBbProject(input),
     }),
     node_open_thread: async (input) => ({
       node: await service.openThread(input),

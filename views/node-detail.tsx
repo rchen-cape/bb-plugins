@@ -32,6 +32,7 @@ export interface NodeUpdatePatch {
   handoff?: Handoff;
   customBrief?: string;
   workspace?: WorkspaceTarget;
+  baseBranch?: string | null;
   contextIncludes?: string[];
 }
 
@@ -51,7 +52,6 @@ export interface NodeDetailProps {
     projectId: string;
     label: string;
   }[];
-  treeBbProjectId: string | null;
   branches: readonly string[];
   defaultBranch: string | null;
   branchProblem: string | null;
@@ -72,7 +72,6 @@ export interface NodeDetailProps {
   onRemoveDependency: (parentId: string) => void;
   onPreviewContext: () => void;
   onCreateThread: (args: { baseBranch: string; prompt: string }) => void;
-  onAttachBbProject: (bbProjectId: string) => void;
   onSetState: (target: StateTarget) => void;
   onResend: () => void;
   onOpenThread: () => void;
@@ -325,73 +324,70 @@ function Disclosure({
   );
 }
 
+/*
+ * What an agent task needs before it can run: the project it works in, the
+ * branch to cut its worktree from, and a first message. A tree spans
+ * projects, so both belong to the task rather than to the tree.
+ */
 function AgentStart({
-  treeBbProjectId,
   bbProjects,
+  workspaceProjectId,
   branches,
   defaultBranch,
   branchProblem,
   busy,
   busyAction,
-  onAttachBbProject,
+  onChooseProject,
   onCreateThread,
   instruction,
   onInstructionChange,
   onInstructionCommit,
 }: {
-  treeBbProjectId: string | null;
   bbProjects: readonly { id: string; name: string }[];
+  workspaceProjectId: string | null;
   branches: readonly string[];
   defaultBranch: string | null;
   branchProblem: string | null;
   busy: boolean;
   busyAction: string | null;
-  onAttachBbProject: (bbProjectId: string) => void;
+  onChooseProject: (bbProjectId: string) => void;
   onCreateThread: (args: { baseBranch: string; prompt: string }) => void;
   instruction: string;
   onInstructionChange: (value: string) => void;
   onInstructionCommit: () => void;
 }) {
   const [branch, setBranch] = useState("");
-  const [bbProjectId, setBbProjectId] = useState("");
   const chosenBranch = branch === "" ? (defaultBranch ?? "") : branch;
-  const chosenProject =
-    bbProjectId === "" ? (bbProjects[0]?.id ?? "") : bbProjectId;
 
-  if (treeBbProjectId === null) {
+  if (workspaceProjectId === null) {
     return (
       <div className="flex min-h-0 flex-1 flex-col gap-2">
         <p className="text-sm text-muted-foreground">
-          This tree is not pointed at a bb project yet, so its agent tasks have
-          nowhere to make a worktree.
+          Which project does this task change? It gets its own worktree there,
+          so each task in a tree can work in a different checkout.
         </p>
         {bbProjects.length === 0 ? (
           <p className="text-xs text-destructive" role="alert">
             Add a bb project first.
           </p>
         ) : (
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <select
-              aria-label="bb project for this tree"
-              className={selectClass}
-              value={chosenProject}
-              disabled={busy}
-              onChange={(event) => setBbProjectId(event.target.value)}
-            >
-              {bbProjects.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-            <Button
-              size="sm"
-              disabled={busy || chosenProject === ""}
-              onClick={() => onAttachBbProject(chosenProject)}
-            >
-              {busyAction === "attach" ? "Linking…" : "Use this project"}
-            </Button>
-          </div>
+          <select
+            aria-label="Project it works in"
+            className={selectClass}
+            value=""
+            disabled={busy}
+            onChange={(event) => {
+              if (event.target.value !== "")
+                onChooseProject(event.target.value);
+            }}
+          >
+            <option value="">Project to work in…</option>
+            {bbProjects.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+              </option>
+            ))}
+          </select>
         )}
       </div>
     );
@@ -513,6 +509,8 @@ export function NodeDetail(props: NodeDetailProps) {
   );
   const artifactContent = artifactDraft ?? props.artifact?.content ?? "";
   const documentDisabled = props.artifact === null && artifactDraft === null;
+  const workspaceProjectId =
+    node.workspace.kind === "project" ? node.workspace.projectId : null;
   const noteImages = referencedImages(artifactContent);
   const childTitles = props.projectNodes
     .filter((candidate) => candidate.dependsOn.includes(node.id))
@@ -719,14 +717,16 @@ export function NodeDetail(props: NodeDetailProps) {
           />
         ) : node.kind === "agent" ? (
           <AgentStart
-            treeBbProjectId={props.treeBbProjectId}
             bbProjects={props.bbProjects}
+            workspaceProjectId={workspaceProjectId}
             branches={props.branches}
             defaultBranch={props.defaultBranch}
             branchProblem={props.branchProblem}
             busy={busy}
             busyAction={props.busyAction}
-            onAttachBbProject={props.onAttachBbProject}
+            onChooseProject={(projectId) =>
+              props.onUpdate({ workspace: { kind: "project", projectId } })
+            }
             onCreateThread={props.onCreateThread}
             instruction={instruction}
             onInstructionChange={setInstruction}
@@ -992,11 +992,48 @@ export function NodeDetail(props: NodeDetailProps) {
                 {node.workspace.kind === "environment"
                   ? "Runs in a workspace it shares with anything else pointed at it."
                   : node.workspace.kind === "project"
-                    ? "Gets its own workspace from that project — a fresh worktree when the project is set up for one."
+                    ? "Gets its own worktree from that project, cut from the branch below."
                     : node.workspace.kind === "path"
                       ? "Set from the CLI. Runs in the bb project that owns this directory."
                       : "No repository. Its context arrives in the prompt and its deliverable is its final message."}
               </p>
+              {/*
+               * The branch belongs with the project it is a branch of. Only a
+               * task cutting its own worktree has one to choose.
+               */}
+              {node.workspace.kind === "project" ||
+              node.workspace.kind === "path" ? (
+                <>
+                  <select
+                    aria-label="Branch"
+                    className={selectClass}
+                    value={node.baseBranch ?? ""}
+                    disabled={busy}
+                    onChange={(event) =>
+                      props.onUpdate({
+                        baseBranch:
+                          event.target.value === "" ? null : event.target.value,
+                      })
+                    }
+                  >
+                    <option value="">
+                      {props.branches.length === 0
+                        ? "No branches found"
+                        : "The project's default branch"}
+                    </option>
+                    {props.branches.map((candidate) => (
+                      <option key={candidate} value={candidate}>
+                        {candidate}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-2xs text-subtle-foreground">
+                    {node.threadId === null
+                      ? "The branch its worktree will be cut from."
+                      : "The branch its worktree was cut from. Changing it applies the next time this task is started."}
+                  </p>
+                </>
+              ) : null}
             </Field>
           ) : null}
 

@@ -36,11 +36,12 @@ its Markdown files untouched.
 Tree folders resolve on the primary machine, so `~` expands to the home
 directory of the account running the BB server.
 
-A tree also **references a bb project**. That reference decides where its agent
-tasks run — each one gets its own worktree from that project — and nothing
-else: the tree's Markdown always stays in the Trees folder, never inside the
-project's checkout. Set it when you create the tree, or later with
-`bb tree project attach <tree> --bb-project <proj-id>`.
+**A tree belongs to no project.** Its Markdown lives in the Trees folder, and
+which repository gets changed is each agent task's own business: every agent
+task names the project it works in and the branch to cut its worktree from. One
+tree can therefore change several codebases — a schema in one repository, the
+client that consumes it in another, the release notes in a third — while the
+plan for all of it stays in one graph.
 
 Each tree on the index has a folder button that opens its directory in your
 file manager, or `bb tree project reveal <tree>`. It runs on the machine hosting
@@ -337,23 +338,32 @@ outside BB is noticed too.
 
 ## Where an agent task runs
 
-| Choice                               | Behavior                                                                                                                                               |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| A scratch workspace (default)        | A bb-managed personal workspace. The agent gets its context in the prompt and returns the deliverable as its final message, so it needs no repository. |
-| A bb project                         | The project's own default environment, so the task gets **its own** workspace — a fresh worktree when the project is set up for one.                   |
-| A new worktree off a branch you pick | What a new agent task gets: bb checks out a fresh worktree from the branch you chose and opens an empty thread in it.                                  |
-| An existing workspace                | The task runs in that exact environment, sharing it with every other task pointed at it.                                                               |
-| A directory you name (CLI only)      | Resolved to the bb project that owns that directory, then run through that project's environment.                                                      |
+Two choices, both the task's own: **which project** it changes, and **which
+branch** its worktree is cut from.
 
-Set it in the panel under **Where it runs**, or with
-`bb tree node update <task> --workspace scratch|<proj_id>|<env_id>|<absolute path>`.
+| Choice                          | Behavior                                                                                                                                               |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A scratch workspace (default)   | A bb-managed personal workspace. The agent gets its context in the prompt and returns the deliverable as its final message, so it needs no repository. |
+| A bb project                    | Its own fresh worktree in that project, cut from the branch below. Two tasks in one project cannot tread on each other.                                |
+| An existing workspace           | The task runs in that exact environment, sharing it with every other task pointed at it — right when a later task continues earlier work in place.     |
+| A directory you name (CLI only) | Resolved to the bb project that owns that directory.                                                                                                   |
 
-That last distinction is the one that matters when several agents work on the
-same codebase. Point two tasks at a **bb project** and each gets its own
-worktree, so they cannot tread on each other. Point them at the same **existing
-workspace** and they share one checkout, which is what you want when a later
-task continues the work of an earlier one in place. A task that shares a
-workspace still runs in its own thread with its own context.
+| Branch         | Behavior                                                             |
+| -------------- | -------------------------------------------------------------------- |
+| One you pick   | The worktree is cut from that branch.                                |
+| None (default) | The project's own default environment decides, as it does elsewhere. |
+
+Set both in the panel under **Where it runs**, or with
+`bb tree node update <task> --workspace scratch|<proj_id>|<env_id>|<absolute path> --branch <name>`.
+`--branch=` with nothing after it clears the branch again.
+
+An agent task with no project yet asks for one before anything else, since
+there is nothing to branch from until it has one. Starting a task from the panel
+remembers the branch it was started on.
+
+Changing the branch of a task that already has a thread does not move that
+worktree — it applies the next time the task is started, after detaching the
+thread.
 
 The panel lists ready environments only, grouped as _Its own new workspace_
 (projects) and _Share an existing workspace_ (environments), labelled by project
@@ -385,6 +395,8 @@ server's. Pass `--machine <id-or-name>` to target another enrolled machine.
 - An agent task cannot be pointed straight at an arbitrary directory: bb runs
   threads in project-owned or bb-managed workspaces, so a named directory has
   to belong to a bb project.
+- Changing a task's branch after its thread exists does not move the worktree
+  it already has.
 - The Markdown editor in the panel is a plain text area. Open the file with the
   Docs plugin or your editor for a richer one.
 - Renaming a task does not rename its Markdown file; the file name is fixed when

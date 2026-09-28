@@ -24,7 +24,6 @@ const project: TreeProject = {
   id: "trp_1",
   name: "Build auth",
   directory: "/Users/me/Trees/build_auth",
-  bbProjectId: "proj_api",
   nodeCount: 2,
   readyCount: 1,
   staleCount: 0,
@@ -66,6 +65,7 @@ function node(overrides: Partial<TreeNode>): TreeNode {
     instruction: "",
     contextMode: "auto_compact",
     handoff: "summary",
+    baseBranch: null,
     customBrief: "",
     contextIncludes: [],
     workspace: { kind: "tree" },
@@ -159,7 +159,6 @@ describe("Trees panel", () => {
     );
     const input = await slot.findByLabelText("New tree name");
     fireEvent.change(input, { target: { value: "Build auth" } });
-    await slot.findByLabelText("bb project");
     fireEvent.click(slot.getByText("New tree"));
 
     await waitFor(() => {
@@ -167,7 +166,7 @@ describe("Trees panel", () => {
         expect.arrayContaining([
           expect.objectContaining({
             method: "projects_create",
-            input: { name: "Build auth", bbProjectId: "proj_api" },
+            input: { name: "Build auth" },
           }),
         ]),
       );
@@ -724,20 +723,59 @@ describe("Trees panel", () => {
     });
   });
 
-  it("starts an agent task in its own worktree off a chosen branch", async () => {
-    const calls: unknown[] = [];
+  /*
+   * A tree spans projects, so an agent task with none yet is asked which one
+   * it changes before it is asked anything about a branch.
+   */
+  it("asks an agent task which project it works in", async () => {
+    const updates: unknown[] = [];
     const slot = renderSlot(
       panel,
       { subPath: `${project.id}/${specs.id}` },
       {
         rpc: baseRpc({
+          node_update: (input: never) => {
+            updates.push(input);
+            return { node: specs };
+          },
+        }),
+      },
+    );
+
+    expect(slot.queryByLabelText("Base branch")).toBeNull();
+    fireEvent.change(await slot.findByLabelText("Project it works in"), {
+      target: { value: "proj_api" },
+    });
+
+    await waitFor(() => {
+      expect(updates).toEqual([
+        {
+          nodeId: specs.id,
+          workspace: { kind: "project", projectId: "proj_api" },
+        },
+      ]);
+    });
+  });
+
+  it("starts an agent task in its own worktree off a chosen branch", async () => {
+    const calls: unknown[] = [];
+    const inProject = node({
+      ...specs,
+      workspace: { kind: "project", projectId: "proj_api" },
+    });
+    const slot = renderSlot(
+      panel,
+      { subPath: `${project.id}/${inProject.id}` },
+      {
+        rpc: baseRpc({
+          graph_get: () => ({ project, nodes: [requirements, inProject] }),
           base_branches: () => ({
             branches: ["main", "feature/push"],
             defaultBranch: "main",
           }),
           node_open_thread: (input: unknown) => {
             calls.push(input);
-            return { node: { ...specs, threadId: "th_1" } };
+            return { node: { ...inProject, threadId: "th_1" } };
           },
         }),
       },
@@ -760,7 +798,7 @@ describe("Trees panel", () => {
     await waitFor(() => {
       expect(calls).toEqual([
         {
-          nodeId: specs.id,
+          nodeId: inProject.id,
           baseBranch: "feature/push",
           prompt: "Draft the schema.",
         },

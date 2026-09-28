@@ -21,7 +21,6 @@ import {
   insertEdge,
   insertNode,
   insertProject,
-  setProjectBbProject as setProjectBbProjectRow,
   listEdges,
   listPendingSummaryNodeIds,
   listNodes,
@@ -169,6 +168,7 @@ export interface CreateNodeArgs {
   handoff?: Handoff;
   customBrief?: string;
   workspace?: WorkspaceTarget;
+  baseBranch?: string | null;
   dependsOn?: readonly string[];
   position?: { x: number; y: number };
 }
@@ -181,6 +181,7 @@ export interface UpdateNodeInput {
   handoff?: Handoff;
   customBrief?: string;
   workspace?: WorkspaceTarget;
+  baseBranch?: string | null;
   contextIncludes?: readonly string[];
 }
 
@@ -260,7 +261,15 @@ type NodePlacement = {
   environment:
     | { type: "project-default" }
     | { type: "reuse"; environmentId: string }
-    | { type: "host"; workspace: { type: "personal" } };
+    | { type: "host"; workspace: { type: "personal" } }
+    | {
+        type: "host";
+        hostId: string;
+        workspace: {
+          type: "managed-worktree";
+          baseBranch: { kind: "named"; name: string };
+        };
+      };
 };
 
 const PERSONAL_WORKSPACE_ENVIRONMENT: NodePlacement["environment"] = {
@@ -271,17 +280,10 @@ const PERSONAL_WORKSPACE_ENVIRONMENT: NodePlacement["environment"] = {
 export interface TreeService {
   listProjects(): TreeProject[];
   getProject(projectId: string): TreeProject;
-  createProject(args: {
-    name: string;
-    bbProjectId?: string | null;
-  }): Promise<TreeProject>;
+  createProject(args: { name: string }): Promise<TreeProject>;
   listBaseBranches(args: {
-    projectId: string;
-  }): Promise<{ branches: string[]; defaultBranch: string | null }>;
-  setBbProject(args: {
-    projectId: string;
     bbProjectId: string;
-  }): Promise<TreeProject>;
+  }): Promise<{ branches: string[]; defaultBranch: string | null }>;
   openThread(args: {
     nodeId: string;
     baseBranch: string;
@@ -430,6 +432,7 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
       customBrief: args.row.customBrief,
       contextIncludes: args.row.contextIncludes,
       workspace: args.row.workspace,
+      baseBranch: args.row.baseBranch,
       threadId: args.row.threadId,
       dependsOn: parentIdsOf(args.graph, args.row.id),
       x: args.row.x,
@@ -464,7 +467,6 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
       id: loaded.project.id,
       name: loaded.project.name,
       directory: loaded.project.directory,
-      bbProjectId: loaded.project.bbProjectId,
       nodeCount: loaded.states.size,
       readyCount,
       staleCount,
@@ -508,32 +510,30 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
     baseBranch: string;
     prompt: string;
   }): Promise<void> {
-    const project = requireProject(args.node.projectId);
-    if (project.bbProjectId === null) {
-      throw new TreeError(
-        `${project.name} is not associated with a bb project, so its agent tasks have nowhere to check out.`,
-      );
-    }
     const instruction = requireText(args.prompt, {
       field: "A first message",
       maxLength: MAX_INSTRUCTION_LENGTH,
     });
     const now = Date.now();
-    updateNodeRow(db, { nodeId: args.node.id, now, instruction });
-    const preview = await buildContextPreview(requireNode(args.node.id));
+    // The branch it was opened on is the branch it belongs to from now on.
+    updateNodeRow(db, {
+      nodeId: args.node.id,
+      now,
+      instruction,
+      baseBranch: args.baseBranch,
+    });
+    const node = requireNode(args.node.id);
+    const placement = await nodePlacement(node);
+    const preview = await buildContextPreview(node);
     const thread = threadSchema.parse(
       await bb.sdk.threads.spawn({
-        projectId: project.bbProjectId,
-        environment: {
-          type: "host",
-          hostId: await primaryHostId(),
-          workspace: {
-            type: "managed-worktree",
-            baseBranch: { kind: "named", name: args.baseBranch },
-          },
-        },
+        projectId: placement.projectId,
+        environment: placement.environment,
         title: args.node.title,
-        prompt: preview.prompt,
+        input: await promptInput({
+          preview,
+          projectId: placement.projectId,
+        }),
         pluginMetadata: {
           treeProjectId: args.node.projectId,
           treeNodeId: args.node.id,
@@ -911,17 +911,22 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
     touchProject(db, { projectId: args.node.projectId, now: args.now });
   }
 
+  /*
+   * Where one task works. A tree spans projects: the task names the project,
+   * and naming a branch as well cuts it a worktree from that branch, so two
+   * tasks in one tree can change different things in different checkouts.
+   */
   async function nodePlacement(node: NodeRow): Promise<NodePlacement> {
     if (node.workspace.kind === "project") {
       return {
         projectId: node.workspace.projectId,
-        environment: { type: "project-default" },
+        environment: await branchEnvironment(node),
       };
     }
     if (node.workspace.kind === "path") {
       return {
         projectId: await resolveProjectOwningPath(node.workspace.path),
-        environment: { type: "project-default" },
+        environment: await branchEnvironment(node),
       };
     }
     if (node.workspace.kind === "environment") {
@@ -937,6 +942,20 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
     return {
       projectId: await resolvePersonalProjectId(),
       environment: PERSONAL_WORKSPACE_ENVIRONMENT,
+    };
+  }
+
+  async function branchEnvironment(
+    node: NodeRow,
+  ): Promise<NodePlacement["environment"]> {
+    if (node.baseBranch === null) return { type: "project-default" };
+    return {
+      type: "host",
+      hostId: await primaryHostId(),
+      workspace: {
+        type: "managed-worktree",
+        baseBranch: { kind: "named", name: node.baseBranch },
+      },
     };
   }
 
@@ -964,15 +983,10 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
     },
 
     async listBaseBranches(args) {
-      const project = requireProject(args.projectId);
-      if (project.bbProjectId === null) {
-        throw new TreeError(
-          `${project.name} is not associated with a bb project, so it has no branches to start from.`,
-        );
-      }
+      await requireBbCheckout(args.bbProjectId);
       const result = branchOptionsSchema.parse(
         await bb.sdk.projects.branches({
-          projectId: project.bbProjectId,
+          projectId: args.bbProjectId,
           hostId: await primaryHostId(),
         }),
       );
@@ -993,18 +1007,6 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
       const project = requireProject(args.projectId);
       await deps.revealDirectory(project.directory);
       return project.directory;
-    },
-
-    async setBbProject(args) {
-      const project = requireProject(args.projectId);
-      await requireBbCheckout(args.bbProjectId);
-      setProjectBbProjectRow(db, {
-        projectId: project.id,
-        bbProjectId: args.bbProjectId,
-        now: Date.now(),
-      });
-      publish(project.id);
-      return summaryOf(loadProject(project.id));
     },
 
     async openThread(args) {
@@ -1036,8 +1038,6 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
           `Trees holds at most ${MAX_PROJECTS} projects. Delete one before adding another.`,
         );
       }
-      const bbProjectId = args.bbProjectId ?? null;
-      if (bbProjectId !== null) await requireBbCheckout(bbProjectId);
       const rootDirectory = await deps.resolveRootDirectory();
       const directory = projectDirectory({ rootDirectory, name });
       if (findProjectByDirectory(db, directory) !== null) {
@@ -1047,12 +1047,7 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
       }
       await bb.sdk.files.mkdir({ path: directory, recursive: true });
       const now = Date.now();
-      const project = insertProject(db, {
-        name,
-        directory,
-        bbProjectId,
-        now,
-      });
+      const project = insertProject(db, { name, directory, now });
       publish(project.id);
       return summaryOf(loadProject(project.id));
     },
@@ -1160,6 +1155,7 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
           maxLength: MAX_INSTRUCTION_LENGTH,
         }),
         workspace: args.workspace ?? { kind: "tree" },
+        baseBranch: args.baseBranch ?? null,
         x: args.position?.x ?? 0,
         y: args.position?.y ?? 0,
         now,
@@ -1234,6 +1230,32 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
           );
         }
         update.workspace = args.workspace;
+      }
+      if (args.baseBranch !== undefined) {
+        if (node.kind !== "agent") {
+          throw new TreeError(
+            "Only agent tasks work on a branch; a note is a file in the tree's folder.",
+          );
+        }
+        /*
+         * Checked against the project the task actually names, so a branch
+         * cannot be set for one checkout and used against another.
+         */
+        if (args.baseBranch !== null) {
+          const branch = requireText(args.baseBranch, {
+            field: "A branch name",
+            maxLength: MAX_TITLE_LENGTH,
+          });
+          const target = args.workspace ?? node.workspace;
+          if (target.kind === "tree" || target.kind === "environment") {
+            throw new TreeError(
+              "Choose the project this task works in before its branch.",
+            );
+          }
+          update.baseBranch = branch;
+        } else {
+          update.baseBranch = null;
+        }
       }
       if (args.contextIncludes !== undefined) {
         const graph = graphOf(node.projectId);
