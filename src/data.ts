@@ -38,7 +38,7 @@ export const migrations = [
      summary TEXT NOT NULL DEFAULT '',
      input_digest TEXT NOT NULL DEFAULT '',
      instruction TEXT NOT NULL DEFAULT '',
-     context_mode TEXT NOT NULL DEFAULT 'all_parents',
+     context_mode TEXT NOT NULL DEFAULT 'auto_compact',
      custom_brief TEXT NOT NULL DEFAULT '',
      workspace_kind TEXT NOT NULL DEFAULT 'tree',
      workspace_ref TEXT,
@@ -84,6 +84,10 @@ export const migrations = [
    * A consumer can no longer overrule the producer, so "full_parents" has no
    * meaning left: how much a parent sends is the parent's handoff alone. Both
    * old modes collapse into the one that means "every task it depends on".
+   *
+   * Every statement above is hashed once it has run, so the column default
+   * migration 0 wrote stays the retired 'auto_compact' forever. Nothing reads
+   * it: insertNode always names context_mode.
    */
   `UPDATE tree_nodes SET context_mode = 'all_parents'
      WHERE context_mode IN ('auto_compact', 'full_parents');`,
