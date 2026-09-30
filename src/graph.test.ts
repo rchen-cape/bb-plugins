@@ -20,7 +20,7 @@ function node(id: string, overrides: Partial<GraphNode> = {}): GraphNode {
     artifactDigest: "",
     inputDigest: "",
     instruction: "",
-    contextMode: "auto_compact",
+    contextMode: "all_parents",
     handoff: "summary",
     customBrief: "",
     contextIncludes: [],
@@ -199,33 +199,16 @@ describe("state resolution", () => {
     expect(states.get("b")).toBe("ready");
   });
 
-  it("does not stale a full-parent child when only the summary changed", () => {
-    const graph = settle(
-      chain(
-        [node("a"), node("b", { contextMode: "full_parents" })],
-        [["a", "b"]],
-      ),
-      ["a", "b"],
-    );
-    const edited: Graph = {
-      nodes: graph.nodes.map((candidate) =>
-        candidate.id === "a"
-          ? { ...candidate, summary: "only the summary moved" }
-          : candidate,
-      ),
-      edges: graph.edges,
-    };
-    expect(resolveNodeStates(edited).get("b")).toBe("completed");
-  });
-
-  it("stales a full-parent child when the parent's file changed", () => {
-    const graph = settle(
-      chain(
-        [node("a"), node("b", { contextMode: "full_parents" })],
-        [["a", "b"]],
-      ),
-      ["a", "b"],
-    );
+  /*
+   * A reader never sees more of a parent than the parent hands over, so a
+   * rewrite of a document only a summary is drawn from is nothing the child
+   * read. Warning about it would be a warning about text it was never sent.
+   */
+  it("does not stale a child when a summary parent's document changed", () => {
+    const graph = settle(chain([node("a"), node("b")], [["a", "b"]]), [
+      "a",
+      "b",
+    ]);
     const edited: Graph = {
       nodes: graph.nodes.map((candidate) =>
         candidate.id === "a"
@@ -234,7 +217,7 @@ describe("state resolution", () => {
       ),
       edges: graph.edges,
     };
-    expect(resolveNodeStates(edited).get("b")).toBe("stale");
+    expect(resolveNodeStates(edited).get("b")).toBe("completed");
   });
 
   it("stales a completed task when its own instruction changes", () => {

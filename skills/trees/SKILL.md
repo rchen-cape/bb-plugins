@@ -24,8 +24,8 @@ downstream. Do not finish with a status report about the work; finish with the
 work.
 
 Trees then asks you, in the same thread, for a summary spec of at most 200
-words. Answer with the summary text alone — that text is all a downstream task
-receives under the default context mode.
+words. Answer with the summary text alone — under the default handoff, that
+text is all a downstream task receives.
 
 ## The `bb tree` command
 
@@ -107,32 +107,34 @@ does not move the worktree it has.
 Only an agent task receives context — it is the prompt its thread opens with.
 A note has none, and its panel offers no context choice.
 
-- `auto_compact` (default) — the child receives only the parents' summaries.
-- `full_parents` — the child receives the parents' complete Markdown output.
-  Use it when the exact text matters, such as code generation from a spec.
-- `custom` — the child receives a brief you write plus the summaries of the
-  specific upstream tasks you list with `--include`.
+The mode chooses which upstream tasks a task hears from. It never chooses how
+much each one says — that is the parent's handoff, below.
+
+- `all_parents` (default) — the child hears from every task it depends on.
+- `custom` — the child hears from the upstream tasks you list with `--include`,
+  which may be any ancestor rather than only a parent, plus a brief you write.
 
 Set the mode with `bb tree node update <task> --context-mode <mode>`, and check
 the result with `bb tree context <task>` before starting the task.
 
 ## What a task passes downstream
 
-The context mode above is what a task asks for. What a task gives is its
-handoff, set with `bb tree node update <task> --handoff <mode>`:
+A task's handoff decides how much of it travels downstream, and it is the only
+thing that decides. Set it with `bb tree node update <task> --handoff <mode>`:
 
 - `summary` (default) — completing the task compacts its output to under 200
   words, and downstream tasks receive that.
 - `custom` — downstream tasks receive exactly the text in the summary field,
   which you set with `bb tree summary <task> --text "…"`. Completion never
   overwrites it.
-- `full` — downstream tasks receive the whole Markdown file, however little
-  they asked for, and no summary is written at all. This is the only handoff
-  that carries a note's images: each is attached to the message the child
-  receives, and the document marks where it sat as `_[Image 1: alt text]_`.
+- `full` — downstream tasks receive the whole Markdown file, and no summary is
+  written at all. This is the only handoff that carries a note's images: each
+  is attached to the message the child receives, and the document marks where
+  it sat as `_[Image 1: alt text]_`.
 
-The producer wins: a `full` parent sends its document even to a child on
-`auto_compact`. Only `summary` costs a model call on completion.
+What a task's panel shows as the context it sends down is exactly what its
+children receive; a child cannot ask for more. Only `summary` costs a model
+call on completion.
 
 ## Images in a note
 

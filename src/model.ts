@@ -24,19 +24,20 @@ export const COMPLETIONS = ["open", "working", "done"] as const;
 export const completionSchema = z.enum(COMPLETIONS);
 export type Completion = z.infer<typeof completionSchema>;
 
-export const CONTEXT_MODES = [
-  "auto_compact",
-  "full_parents",
-  "custom",
-] as const;
+/*
+ * Which upstream tasks a task hears from, and nothing about how much each one
+ * says: that is the producer's handoff below, so what a parent shows as the
+ * context it sends down is exactly what its children receive.
+ */
+export const CONTEXT_MODES = ["all_parents", "custom"] as const;
 export const contextModeSchema = z.enum(CONTEXT_MODES);
 export type ContextMode = z.infer<typeof contextModeSchema>;
 
 /*
- * What a finished task hands to the tasks that depend on it. The consumer's
- * context mode decides what it asks for; this decides what this task is
- * willing to give, and "full" wins over a consumer that only asked for a
- * summary — a note whose exact wording matters has no summary worth sending.
+ * What a finished task hands to every task that depends on it. This is the
+ * only thing that decides how much of the task travels downstream — a
+ * consumer chooses which upstream tasks it hears from, never how much each
+ * one says.
  *
  * "summary" and "custom" both send the summary field; they differ in who
  * writes it. Completion asks a model under "summary" and leaves the field
@@ -113,9 +114,15 @@ export const treeGraphSchema = z
 export type TreeGraph = z.infer<typeof treeGraphSchema>;
 
 export const CONTEXT_MODE_LABELS: Record<ContextMode, string> = {
-  auto_compact: "Auto-compact",
-  full_parents: "Full parent output",
-  custom: "Custom",
+  all_parents: "Every task it depends on",
+  custom: "The upstream tasks I choose",
+};
+
+export const CONTEXT_MODE_HINTS: Record<ContextMode, string> = {
+  all_parents:
+    "Each parent sends what its own handoff says it sends: a summary, or its whole document.",
+  custom:
+    "The brief below plus the upstream tasks you tick, each sending what its own handoff says it sends.",
 };
 
 export const HANDOFF_LABELS: Record<Handoff, string> = {

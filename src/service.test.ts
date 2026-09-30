@@ -1079,7 +1079,7 @@ describe("trees service", () => {
       kind: "agent",
       dependsOn: [note.id],
     });
-    expect(child.contextMode).toBe("auto_compact");
+    expect(child.contextMode).toBe("all_parents");
 
     fakes.files.set(note.artifactPath, "Exact wording that must survive.");
     await call("node_complete", { nodeId: note.id, awaitSummary: true });
@@ -1562,13 +1562,12 @@ describe("trees service", () => {
       projectId: project.id,
       title: "Research",
       kind: "markdown",
-      contextMode: "full_parents",
+      handoff: "full",
     });
     const child = await createNode(call, {
       projectId: project.id,
       title: "Spec",
       kind: "markdown",
-      contextMode: "full_parents",
       dependsOn: [parent.id],
     });
     fakes.files.set(parent.artifactPath, "First findings.");

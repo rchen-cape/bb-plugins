@@ -32,9 +32,8 @@ export interface AssembleContextArgs {
 const NO_SUMMARY = "_No summary was recorded for this task._";
 const NO_ARTIFACT = "_This task has no saved output._";
 
-function sourceSection(source: ContextSource, mode: ContextMode): string {
-  // The reader asked for everything, or the writer insists on sending it.
-  if (mode === "full_parents" || source.handoff === "full") {
+function sourceSection(source: ContextSource): string {
+  if (source.handoff === "full") {
     const body = source.artifact.trim();
     return [
       `### Context from ${source.title} (${source.artifactFile}, full output)`,
@@ -80,7 +79,7 @@ export function assembleContext(args: AssembleContextArgs): string {
   } else {
     blocks.push("## Upstream context");
     for (const source of args.sources) {
-      blocks.push(sourceSection(source, args.mode));
+      blocks.push(sourceSection(source));
     }
   }
 

@@ -162,7 +162,7 @@ export const TREE_CLI_COMMANDS = [
     name: "node",
     summary: "Create, inspect, and edit the tasks in a tree.",
     usage:
-      "bb tree node list|show|create|update|move|delete [<node>] [--project <project>] [--title <title>] [--kind markdown|agent] [--instruction <text>] [--context-mode auto_compact|full_parents|custom] [--brief <text>] [--depends-on <node>] [--include <node>] [--workspace scratch|<bb project id>|<absolute path>] [--branch <name>] [--x <px> --y <px>] [--json]",
+      "bb tree node list|show|create|update|move|delete [<node>] [--project <project>] [--title <title>] [--kind markdown|agent] [--instruction <text>] [--context-mode all_parents|custom] [--brief <text>] [--depends-on <node>] [--include <node>] [--workspace scratch|<bb project id>|<absolute path>] [--branch <name>] [--x <px> --y <px>] [--json]",
   },
   {
     name: "dep",

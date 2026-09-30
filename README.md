@@ -178,28 +178,32 @@ drift from it.
 
 ## Context passed to a task
 
-Two choices meet here: what a task **receives**, and what each of its parents
-is willing to **give**.
+Two choices meet here: **which** upstream tasks a task hears from, and **how
+much** each of those tasks says. The first belongs to the reader, the second to
+the writer alone.
 
 Only an **agent task** receives anything: the context is the prompt its thread
 opens with. A note is a file you write, so it has no context to receive and its
 panel offers no such choice — but it still chooses what it passes downstream,
 which is often the whole point of writing it.
 
-Each agent task chooses what it receives from upstream:
+Each agent task chooses which upstream tasks it hears from:
 
-- **Auto-compact** (default) — the parents' summaries only.
-- **Full parent output** — the parents' complete Markdown files. Right for code
-  generation from a spec, where the exact wording matters.
-- **Custom** — a brief you write, plus the summaries of the specific upstream
-  tasks you select.
+- **Every task it depends on** (default) — all of its parents.
+- **The upstream tasks I choose** — a brief you write, plus the upstream tasks
+  you tick, which may be any ancestor rather than only a parent.
+
+Either way, each of those tasks contributes exactly what its own handoff says
+it contributes. A reader cannot ask a parent for more than the parent passes
+down, so the box a parent shows under **What it passes downstream** is what its
+children actually read.
 
 With several parents, the sections are labelled per parent
 (`### Context from Write auth requirements (summary)`), so an agent can tell
 the sources apart.
 
-And each task chooses what it passes downstream, in its **What it passes
-downstream** section or with
+And each task chooses how much of itself it passes downstream, in its **What it
+passes downstream** section or with
 `bb tree node update <task> --handoff summary|custom|full`. The box in that
 section always holds what will actually go down, and the choice above it
 decides what fills the box:
@@ -218,10 +222,9 @@ decides what fills the box:
   that carries the note's **images**: they travel with the document they
   belong to.
 
-The producer wins: a parent set to pass its whole document sends it even to a
-child on the default auto-compact. Staleness follows the same rule — a child
-reading a parent's document is warned when that document changes, and is not
-disturbed by a rewrite of a summary it never sees.
+Staleness follows what a parent actually sends — a child reading a parent's
+document is warned when that document changes, and is not disturbed by a
+rewrite of a summary it never sees.
 
 Only **Auto-summarized** calls a model on completion. The other two skip that
 step, which is the slowest part of completing a task. `bb tree compact <task>`

@@ -7,6 +7,7 @@ import { Textarea } from "@bb/shared-ui/textarea";
 import { cn } from "@bb/shared-ui/lib/utils";
 import {
   CONTEXT_MODES,
+  CONTEXT_MODE_HINTS,
   CONTEXT_MODE_LABELS,
   HANDOFF_HINTS,
   HANDOFF_LABELS,
@@ -890,6 +891,9 @@ export function NodeDetail(props: NodeDetailProps) {
                   </option>
                 ))}
               </select>
+              <p className="text-2xs text-subtle-foreground">
+                {CONTEXT_MODE_HINTS[node.contextMode]}
+              </p>
               {node.contextMode === "custom" ? (
                 <>
                   <Textarea

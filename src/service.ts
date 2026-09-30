@@ -766,8 +766,7 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
     for (const sourceId of sourceIds) {
       const source = rows.get(sourceId);
       if (source === undefined) continue;
-      const sendsDocument =
-        node.contextMode === "full_parents" || source.handoff === "full";
+      const sendsDocument = source.handoff === "full";
       const artifact = sendsDocument
         ? (await readArtifactContent(source, project)).content
         : "";
@@ -1148,7 +1147,7 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
           field: "A task instruction",
           maxLength: MAX_INSTRUCTION_LENGTH,
         }),
-        contextMode: args.contextMode ?? "auto_compact",
+        contextMode: args.contextMode ?? "all_parents",
         handoff: args.handoff ?? "summary",
         customBrief: boundedText(args.customBrief ?? "", {
           field: "A context brief",

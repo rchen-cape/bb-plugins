@@ -63,7 +63,7 @@ function node(overrides: Partial<TreeNode>): TreeNode {
     summaryStatus: "idle",
     summaryProblem: null,
     instruction: "",
-    contextMode: "auto_compact",
+    contextMode: "all_parents",
     handoff: "summary",
     baseBranch: null,
     customBrief: "",

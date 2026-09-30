@@ -38,7 +38,7 @@ export const migrations = [
      summary TEXT NOT NULL DEFAULT '',
      input_digest TEXT NOT NULL DEFAULT '',
      instruction TEXT NOT NULL DEFAULT '',
-     context_mode TEXT NOT NULL DEFAULT 'auto_compact',
+     context_mode TEXT NOT NULL DEFAULT 'all_parents',
      custom_brief TEXT NOT NULL DEFAULT '',
      workspace_kind TEXT NOT NULL DEFAULT 'tree',
      workspace_ref TEXT,
@@ -80,6 +80,13 @@ export const migrations = [
    * it works in, so the tree's single reference has nothing left to decide.
    */
   `ALTER TABLE tree_projects DROP COLUMN bb_project_id;`,
+  /*
+   * A consumer can no longer overrule the producer, so "full_parents" has no
+   * meaning left: how much a parent sends is the parent's handoff alone. Both
+   * old modes collapse into the one that means "every task it depends on".
+   */
+  `UPDATE tree_nodes SET context_mode = 'all_parents'
+     WHERE context_mode IN ('auto_compact', 'full_parents');`,
 ];
 
 export interface ProjectRow {
