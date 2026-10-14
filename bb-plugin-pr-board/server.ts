@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join, posix } from "node:path";
 import { PluginCliError, cliCommand, defineCli, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { columnFor, humanFeedbackCount, isAwaitingReplyFrom, reviewersOf, unansweredCount, type PullSnapshot } from "./board.js";
+import { columnFor, hasTakenPart, humanFeedbackCount, isAwaitingReplyFrom, reviewersOf, unansweredCount, type PullSnapshot } from "./board.js";
 import { UPDATES_CHANNEL } from "./channel.js";
 import {
   rpcContract,
@@ -16,7 +16,7 @@ import {
   type PullDetail,
 } from "./contract.js";
 import { findDefinitions } from "./definitions.js";
-import { createGitHub, runCommand, type Gh, type Runner } from "./github.js";
+import { createGitHub, runCommand, type Gh, type ListedPull, type Runner } from "./github.js";
 import { createStore, type PullKey } from "./store.js";
 import {
   SUGGESTIONS_TOOL,
@@ -38,7 +38,8 @@ const PERMISSION_MODES = ["accept-edits", "auto", "full"] as const;
 export const REVIEW_SKILL = "/thermo-nuclear-code-quality-review";
 export const FINDINGS_TOOL = "pr_board_record_findings";
 const SKILL_NAME = "pr-board";
-const BOARD_TTL_MS = 30_000;
+const LIST_TTL_MS = 50_000;
+const DETAIL_REFRESH_MS = 15 * 60_000;
 const PULL_TTL_MS = 30_000;
 const VIEWER_TTL_MS = 60 * 60_000;
 const FILE_CACHE_BYTES = 64 * 1024 * 1024;
@@ -80,11 +81,8 @@ export function parseRepoList(value: string): string[] {
 export function boardQueries(repos: readonly string[]) {
   const base = ["is:pr", "is:open", "archived:false", ...repos.map((repo) => `repo:${repo}`)].join(" ");
   return {
-    authored: `${base} author:@me`,
-    mentioned: `${base} mentions:@me`,
-    requested: `${base} user-review-requested:@me`,
-    commented: `${base} commenter:@me`,
-    reviewed: `${base} reviewed-by:@me`,
+    involved: `${base} involves:@me sort:updated-desc`,
+    requested: `${base} user-review-requested:@me sort:updated-desc`,
   };
 }
 
@@ -249,13 +247,74 @@ export function createPlugin(deps: PluginDeps) {
       return login;
     }
 
-    const boardCache = new Map<string, Cached<PullSnapshot[]>>();
-    async function searchPulls(query: string, refresh: boolean): Promise<PullSnapshot[]> {
-      const cached = boardCache.get(query);
-      if (!refresh && fresh(cached, BOARD_TTL_MS, deps.now())) return cached.value;
-      const pulls = await github.searchPulls(query);
-      boardCache.set(query, { value: pulls, at: deps.now() });
-      return pulls;
+    interface Listing {
+      key: string;
+      involved: ListedPull[];
+      requested: ListedPull[];
+      errors: Board["errors"];
+    }
+    let listing: Cached<Listing> | undefined;
+    const snapshots = new Map<string, Cached<PullSnapshot>>();
+    const stalePulls = new Map<string, number>();
+    let invalidations = 0;
+
+    async function listBoard(queries: ReturnType<typeof boardQueries>, refresh: boolean): Promise<Cached<Listing>> {
+      const key = JSON.stringify(queries);
+      const previous = listing?.value.key === key ? listing.value : undefined;
+      if (!refresh && previous !== undefined && fresh(listing, LIST_TTL_MS, deps.now())) return listing;
+      const startedAt = deps.now();
+      const generation = invalidations;
+      const errors: Board["errors"] = [];
+      const list = (query: string, fallback: ListedPull[] | undefined) =>
+        github.listPulls(query).catch((error: unknown): ListedPull[] => {
+          errors.push({ search: query, message: errorMessage(error) });
+          return fallback ?? [];
+        });
+      const [involved, requested] = await Promise.all([
+        list(queries.involved, previous?.involved),
+        list(queries.requested, previous?.requested),
+      ]);
+      const result = { value: { key, involved, requested, errors }, at: startedAt };
+      listing = generation === invalidations ? result : { ...result, at: Number.NEGATIVE_INFINITY };
+      return result;
+    }
+
+    async function boardSnapshots(listed: readonly ListedPull[], refresh: boolean): Promise<{ pulls: PullSnapshot[]; errors: Board["errors"] }> {
+      const now = deps.now();
+      const seen = invalidations;
+      const errors: Board["errors"] = [];
+      const clearStale = (key: string) => {
+        if ((stalePulls.get(key) ?? Number.POSITIVE_INFINITY) <= seen) stalePulls.delete(key);
+      };
+      const needed = listed
+        .filter((entry) => {
+          const known = snapshots.get(entry.id);
+          return (
+            refresh ||
+            known === undefined ||
+            entry.updatedAt > known.value.updatedAt ||
+            now - known.at >= DETAIL_REFRESH_MS ||
+            stalePulls.has(pullKey(known.value))
+          );
+        })
+        .map((entry) => entry.id);
+      if (needed.length > 0) {
+        const fetched = await github.pullSnapshots(needed);
+        for (const pull of fetched.pulls) {
+          snapshots.set(pull.id, { value: pull, at: now });
+          clearStale(pullKey(pull));
+        }
+        for (const message of fetched.errors) errors.push({ search: "PR details", message });
+      }
+      const ids = new Set(listed.map((entry) => entry.id));
+      for (const id of snapshots.keys()) if (!ids.has(id)) snapshots.delete(id);
+      const pulls = listed.flatMap((entry) => {
+        const known = snapshots.get(entry.id);
+        return known === undefined ? [] : [{ ...known.value, checks: entry.checks }];
+      });
+      const shown = new Set(pulls.map(pullKey));
+      for (const key of [...stalePulls.keys()]) if (!shown.has(key)) clearStale(key);
+      return { pulls, errors };
     }
 
     const pullCache = new Map<string, Cached<Promise<PullDetail>>>();
@@ -273,7 +332,9 @@ export function createPlugin(deps: PluginDeps) {
 
     function invalidatePull(pull: PullKey): void {
       pullCache.delete(pullKey(pull));
-      boardCache.clear();
+      invalidations += 1;
+      stalePulls.set(pullKey(pull), invalidations);
+      if (listing !== undefined) listing = { ...listing, at: Number.NEGATIVE_INFINITY };
     }
 
     const fileCache = new Map<string, FileContent>();
@@ -327,33 +388,37 @@ export function createPlugin(deps: PluginDeps) {
       };
     }
 
-    async function board(refresh: boolean): Promise<Board> {
+    let boardRun: { promise: Promise<Board>; generation: number; refresh: boolean } | null = null;
+    function board(refresh: boolean): Promise<Board> {
+      if (boardRun !== null && boardRun.generation === invalidations && (boardRun.refresh || !refresh)) return boardRun.promise;
+      const run = { promise: buildBoard(refresh), generation: invalidations, refresh };
+      boardRun = run;
+      run.promise
+        .finally(() => {
+          if (boardRun === run) boardRun = null;
+        })
+        .catch(() => undefined);
+      return run.promise;
+    }
+
+    async function buildBoard(refresh: boolean): Promise<Board> {
       const repoList = await repos();
       const me = await viewer();
-      const errors: Board["errors"] = [];
       const queries = boardQueries(repoList);
-      const search = (query: string) =>
-        searchPulls(query, refresh).catch((error: unknown): PullSnapshot[] => {
-          errors.push({ search: query, message: errorMessage(error) });
-          return [];
-        });
-      const [authored, mentioned, requested, commented, reviewed] = await Promise.all([
-        search(queries.authored),
-        search(queries.mentioned),
-        search(queries.requested),
-        search(queries.commented),
-        search(queries.reviewed),
-      ]);
-      const mentionedKeys = new Set(mentioned.map(pullKey));
-      const requestedKeys = new Set(requested.map(pullKey));
-      const pulls = new Map<string, PullSnapshot>();
-      for (const pull of [...authored, ...mentioned, ...requested]) pulls.set(pullKey(pull), pull);
-      for (const pull of [...commented, ...reviewed]) {
-        if (isAwaitingReplyFrom(pull, me)) pulls.set(pullKey(pull), pull);
-      }
+      const listed = await listBoard(queries, refresh);
+      const { involved, requested } = listed.value;
+      const involvedIds = new Set(involved.map((entry) => entry.id));
+      const requestedIds = new Set(requested.map((entry) => entry.id));
+      const unique = new Map([...involved, ...requested].map((entry) => [entry.id, entry]));
+      const details = await boardSnapshots([...unique.values()], refresh);
+      const errors = [...listed.value.errors, ...details.errors];
+      const isMentioned = (pull: PullSnapshot) => involvedIds.has(pull.id) && pull.author?.login !== me && !hasTakenPart(pull, me);
+      const pulls = details.pulls.filter(
+        (pull) => pull.author?.login === me || requestedIds.has(pull.id) || isMentioned(pull) || isAwaitingReplyFrom(pull, me),
+      );
       const findingCounts = store.findingCounts();
       const cards = await Promise.all(
-        [...pulls.values()].map(
+        pulls.map(
           async (pull): Promise<BoardCard> => ({
             repo: pull.repo,
             number: pull.number,
@@ -374,16 +439,15 @@ export function createPlugin(deps: PluginDeps) {
             unresolvedThreads: pull.unresolvedThreads,
             unansweredComments: unansweredCount(pull, me),
             isAuthor: pull.author?.login === me,
-            isMentioned: mentionedKeys.has(pullKey(pull)),
-            isRequested: requestedKeys.has(pullKey(pull)),
+            isMentioned: isMentioned(pull),
+            isRequested: requestedIds.has(pull.id),
             isAwaitingReply: pull.author?.login !== me && isAwaitingReplyFrom(pull, me),
             agent: await agentState(pull, findingCounts.get(pullKey(pull)) ?? 0),
           }),
         ),
       );
       cards.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-      const fetchedAt = Math.min(deps.now(), ...Object.values(queries).map((query) => boardCache.get(query)?.at ?? deps.now()));
-      return { viewer: me, repos: repoList, fetchedAt: new Date(fetchedAt).toISOString(), cards, errors };
+      return { viewer: me, repos: repoList, fetchedAt: new Date(listed.at).toISOString(), cards, errors };
     }
 
     async function resolveProjectId(repo: string): Promise<string> {
@@ -899,7 +963,7 @@ export function createPlugin(deps: PluginDeps) {
         commands: {
           board: cliCommand({
             summary: "List your open PRs, PRs that mention you or request your review, and PRs awaiting a reply to your comment, by board column",
-            options: { ...jsonOption, refresh: { type: "boolean", description: "Bypass the 30 second cache" } },
+            options: { ...jsonOption, refresh: { type: "boolean", description: "Check GitHub now and fetch every PR's details again, instead of reusing the last minute's check and only changed PRs" } },
             async run(input) {
               const result = await board(input.options.refresh === true);
               return output(input.options.json, result, [

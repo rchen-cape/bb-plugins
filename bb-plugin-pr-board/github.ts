@@ -60,29 +60,54 @@ function toActor(actor: z.infer<typeof actorSchema>): Actor {
 
 const reviewStateSchema = z.enum(["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"]);
 
-export const BOARD_QUERY = `query($q: String!) {
-  search(type: ISSUE, query: $q, first: 100) {
-    nodes {
-      ... on PullRequest {
-        number title url isDraft createdAt updatedAt headRefName baseRefName additions deletions changedFiles reviewDecision
-        repository { nameWithOwner }
-        author { __typename login avatarUrl(size: 40) }
-        reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login avatarUrl(size: 40) } } } }
-        latestReviews(first: 20) { nodes { state author { __typename login avatarUrl(size: 40) } } }
-        reviews(last: 50) { pageInfo { hasPreviousPage } nodes { state body submittedAt author { __typename login } } }
-        comments(last: 50) { pageInfo { hasPreviousPage } nodes { createdAt author { __typename login } } }
-        reviewThreads(first: 100) { nodes { isResolved comments(last: 20) { nodes { author { __typename login } } } } }
-        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
-      }
+export const BOARD_PAGE_SIZE = 30;
+export const BOARD_THREADS = 30;
+
+const checksField = "commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }";
+
+export const LIST_QUERY = `query($q: String!) {
+  search(type: ISSUE, query: $q, first: ${BOARD_PAGE_SIZE}) {
+    nodes { ... on PullRequest { id updatedAt ${checksField} } }
+  }
+}`;
+
+export const DETAIL_QUERY = `query($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    ... on PullRequest {
+      id number title url isDraft createdAt updatedAt headRefName baseRefName additions deletions changedFiles reviewDecision
+      repository { nameWithOwner }
+      author { __typename login avatarUrl(size: 40) }
+      reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login avatarUrl(size: 40) } } } }
+      latestReviews(first: 20) { nodes { state author { __typename login avatarUrl(size: 40) } } }
+      reviews(last: 50) { pageInfo { hasPreviousPage } nodes { state body submittedAt author { __typename login } } }
+      comments(last: 50) { pageInfo { hasPreviousPage } nodes { createdAt author { __typename login } } }
+      reviewThreads(last: ${BOARD_THREADS}) { nodes { isResolved comments(last: 20) { nodes { author { __typename login } } } } }
+      ${checksField}
     }
   }
 }`;
 
-const boardSchema = z.object({
+const commitsSchema = z.object({
+  nodes: z.array(
+    z.object({
+      commit: z.object({ statusCheckRollup: z.object({ state: z.string() }).nullable() }),
+    }),
+  ),
+});
+
+const listSchema = z.object({
   data: z.object({
     search: z.object({
+      nodes: z.array(z.object({ id: z.string(), updatedAt: z.string(), commits: commitsSchema })),
+    }),
+  }),
+});
+
+const detailSchema = z.object({
+  data: z.object({
         nodes: z.array(
           z.object({
+            id: z.string(),
             repository: z.object({ nameWithOwner: z.string() }),
             number: z.number(),
             title: z.string(),
@@ -131,16 +156,9 @@ const boardSchema = z.object({
                 }),
               ),
             }),
-            commits: z.object({
-              nodes: z.array(
-                z.object({
-                  commit: z.object({ statusCheckRollup: z.object({ state: z.string() }).nullable() }),
-                }),
-              ),
-            }),
-          }),
+            commits: commitsSchema,
+          }).nullable(),
         ),
-    }),
   }),
 });
 
@@ -156,7 +174,21 @@ function withAuthor<T extends { author: z.infer<typeof actorSchema> | null }>(no
   return nodes.flatMap((node) => (node.author === null ? [] : [{ ...node, author: toActor(node.author) }]));
 }
 
-type BoardNode = z.infer<typeof boardSchema>["data"]["search"]["nodes"][number];
+type BoardNode = NonNullable<z.infer<typeof detailSchema>["data"]["nodes"][number]>;
+
+export interface ListedPull {
+  id: string;
+  updatedAt: string;
+  checks: Checks;
+}
+
+function checksOf(commits: z.infer<typeof commitsSchema>): Checks {
+  return CHECK_STATES[commits.nodes[0]?.commit.statusCheckRollup?.state ?? ""] ?? "none";
+}
+
+export function parseListedPulls(raw: string): ListedPull[] {
+  return listSchema.parse(JSON.parse(raw)).data.search.nodes.map((node) => ({ id: node.id, updatedAt: node.updatedAt, checks: checksOf(node.commits) }));
+}
 
 function windowStart(truncated: boolean, times: Array<string | null>): string {
   return truncated ? (times.filter((at) => at !== null).sort()[0] ?? "") : "";
@@ -179,7 +211,12 @@ function conversationOf({ comments, reviews }: BoardNode): ConversationEntry[] {
 }
 
 export function parseBoardPulls(raw: string): PullSnapshot[] {
-  return boardSchema.parse(JSON.parse(raw)).data.search.nodes.map((node) => ({
+  return detailSchema.parse(JSON.parse(raw)).data.nodes.flatMap((node) => (node === null ? [] : [toSnapshot(node)]));
+}
+
+function toSnapshot(node: BoardNode): PullSnapshot {
+  return {
+    id: node.id,
     repo: node.repository.nameWithOwner,
     number: node.number,
     title: node.title,
@@ -194,7 +231,7 @@ export function parseBoardPulls(raw: string): PullSnapshot[] {
     changedFiles: node.changedFiles,
     author: node.author === null ? null : toActor(node.author),
     reviewDecision: node.reviewDecision,
-    checks: CHECK_STATES[node.commits.nodes[0]?.commit.statusCheckRollup?.state ?? ""] ?? "none",
+    checks: checksOf(node.commits),
     requestedReviewers: node.reviewRequests.nodes.flatMap(({ requestedReviewer: reviewer }) =>
       reviewer?.__typename === "User" && reviewer.login !== undefined
         ? [{ login: reviewer.login, avatarUrl: reviewer.avatarUrl ?? null }]
@@ -212,7 +249,7 @@ export function parseBoardPulls(raw: string): PullSnapshot[] {
     unresolvedThreadAuthors: node.reviewThreads.nodes.flatMap((thread) =>
       thread.isResolved ? [] : [withAuthor(thread.comments.nodes).map((comment) => comment.author)],
     ),
-  }));
+  };
 }
 
 const PULL_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
@@ -447,8 +484,18 @@ export function createGitHub(gh: Gh) {
   }
 
   return {
-    async searchPulls(query: string): Promise<PullSnapshot[]> {
-      return parseBoardPulls(await graphql(BOARD_QUERY, { q: query }));
+    async listPulls(query: string): Promise<ListedPull[]> {
+      return parseListedPulls(await graphql(LIST_QUERY, { q: query }));
+    },
+
+    async pullSnapshots(ids: readonly string[]): Promise<{ pulls: PullSnapshot[]; errors: string[] }> {
+      const pages: Array<readonly string[]> = [];
+      for (let start = 0; start < ids.length; start += BOARD_PAGE_SIZE) pages.push(ids.slice(start, start + BOARD_PAGE_SIZE));
+      const results = await Promise.allSettled(pages.map(async (page) => parseBoardPulls(await graphql(DETAIL_QUERY, { ids: page }))));
+      return {
+        pulls: results.flatMap((result) => (result.status === "fulfilled" ? result.value : [])),
+        errors: results.flatMap((result) => (result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : String(result.reason)] : [])),
+      };
     },
 
     async pullDetail(repo: string, number: number): Promise<PullDetail> {

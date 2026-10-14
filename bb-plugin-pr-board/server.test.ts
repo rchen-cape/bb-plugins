@@ -65,7 +65,9 @@ const VIEWED_RESPONSE = {
 
 function searchNode(number: number, overrides: { author?: string; comments?: string[]; threadLast?: string[] } = {}) {
   const user = (login: string) => ({ __typename: "User", login, avatarUrl: null });
+  const commits: { nodes: Array<{ commit: { statusCheckRollup: { state: string } | null } }> } = { nodes: [] };
   return {
+    id: `PR_${number}`,
     repository: { nameWithOwner: "acme/app" },
     number,
     title: `PR ${number}`,
@@ -90,24 +92,33 @@ function searchNode(number: number, overrides: { author?: string; comments?: str
     reviewThreads: {
       nodes: (overrides.threadLast ?? []).map((login) => ({ isResolved: false, comments: { nodes: [{ author: user(login) }] } })),
     },
-    commits: { nodes: [] },
+    commits,
   };
 }
 
-function searchResponse(q: string) {
-  const nodes = q.includes("author:@me")
-    ? [searchNode(1, { author: "me", comments: ["alice"] })]
-    : q.includes("mentions:@me")
-      ? [searchNode(2)]
-      : q.includes("user-review-requested:@me")
-        ? [searchNode(6)]
-      : q.includes("commenter:@me")
-        ? [searchNode(3, { comments: ["me"] }), searchNode(4, { comments: ["me", "alice"] })]
-        : [searchNode(5, { threadLast: ["me"] })];
+type BoardNode = ReturnType<typeof searchNode>;
+
+function boardNodes(): BoardNode[] {
+  return [
+    searchNode(1, { author: "me", comments: ["alice"] }),
+    searchNode(2),
+    searchNode(3, { comments: ["me"] }),
+    searchNode(4, { comments: ["me", "alice"] }),
+    searchNode(5, { threadLast: ["me"] }),
+    searchNode(6),
+  ];
+}
+
+function listResponse(board: readonly BoardNode[], q: string) {
+  const numbers = q.includes("user-review-requested:@me") ? [6] : [1, 2, 3, 4, 5];
+  const nodes = board
+    .filter((node) => numbers.includes(node.number))
+    .map((node) => ({ id: node.id, updatedAt: node.updatedAt, commits: node.commits }));
   return { data: { search: { nodes } } };
 }
 
-function fakeRunner(pullResponse: unknown = PULL_RESPONSE) {
+function fakeRunner(pullResponse: unknown = PULL_RESPONSE, onGraphql?: (variables: { q?: string; ids?: string[] }) => Promise<void> | void) {
+  const board = boardNodes();
   const calls: Array<{ command: string; args: readonly string[]; options: RunOptions }> = [];
   const run = vi.fn(async (command: string, args: readonly string[], options: RunOptions) => {
     calls.push({ command, args, options });
@@ -117,8 +128,12 @@ function fakeRunner(pullResponse: unknown = PULL_RESPONSE) {
     }
     if (args[0] === "api" && args[1] === "user") return "me\n";
     if (args[0] === "api" && args[1] === "graphql") {
-      const { query, variables } = JSON.parse(options.input ?? "{}") as { query: string; variables: { q?: string } };
-      if (variables.q !== undefined) return JSON.stringify(searchResponse(variables.q));
+      const { query, variables } = JSON.parse(options.input ?? "{}") as { query: string; variables: { q?: string; ids?: string[] } };
+      if (variables.q !== undefined || variables.ids !== undefined) await onGraphql?.(variables);
+      if (variables.q !== undefined) return JSON.stringify(listResponse(board, variables.q));
+      if (variables.ids !== undefined) {
+        return JSON.stringify({ data: { nodes: variables.ids.map((id) => board.find((node) => node.id === id) ?? null) } });
+      }
       return JSON.stringify(query.includes("viewerViewedState") ? VIEWED_RESPONSE : pullResponse);
     }
     if (args.includes("--paginate")) {
@@ -126,14 +141,18 @@ function fakeRunner(pullResponse: unknown = PULL_RESPONSE) {
     }
     if (args[0] === "api" && String(args[1]).includes("/compare/")) return `${MERGE_BASE}\n`;
     if (args[0] === "pr" && args[1] === "checkout") return "";
-    if (args[0] === "api" && args[1] === "--method" && String(args[3]).endsWith("/issues/7/comments")) return "{}";
+    if (args[0] === "api" && args[1] === "--method" && /\/issues\/\d+\/comments$/.test(String(args[3]))) return "{}";
     throw new Error(`unexpected command ${command} ${args.join(" ")}`);
   });
-  return { run, calls };
+  const graphqlVariables = () =>
+    calls.flatMap((call) =>
+      call.args[1] === "graphql" ? [(JSON.parse(call.options.input ?? "{}") as { variables: { q?: string; ids?: string[] } }).variables] : [],
+    );
+  return { run, calls, board, graphqlVariables };
 }
 
-function setup() {
-  const runner = fakeRunner();
+function setup(now: () => number = Date.now, onGraphql?: Parameters<typeof fakeRunner>[1]) {
+  const runner = fakeRunner(PULL_RESPONSE, onGraphql);
   const thread = makeThreadResponse({ id: "thr_review", environmentId: "env_1", status: "idle", deletedAt: null, archivedAt: null });
   const { bb, harness } = createFakePluginHost({
     pluginId: "pr-board",
@@ -150,7 +169,7 @@ function setup() {
       environments: { get: async () => ({ id: "env_1", status: "ready", path: "/tmp/worktree", hostId: "host_1" }) as never },
     },
   });
-  createPlugin({ run: runner.run, pollMs: 1, now: Date.now })(bb);
+  createPlugin({ run: runner.run, pollMs: 1, now })(bb);
   return { harness, runner };
 }
 
@@ -220,11 +239,158 @@ describe("board", () => {
       [2, false, true, false, false, 0],
       [1, true, false, false, false, 1],
     ]);
-    const searches = runner.calls.flatMap((call) => {
-      const q = (JSON.parse(call.options.input ?? "{}") as { variables?: { q?: string } }).variables?.q;
-      return q === undefined ? [] : [q];
+    const variables = runner.graphqlVariables();
+    expect(variables.flatMap((entry) => (entry.q === undefined ? [] : [entry.q]))).toEqual([
+      "is:pr is:open archived:false repo:acme/app involves:@me sort:updated-desc",
+      "is:pr is:open archived:false repo:acme/app user-review-requested:@me sort:updated-desc",
+    ]);
+    expect(variables.flatMap((entry) => entry.ids ?? [])).toEqual(["PR_1", "PR_2", "PR_3", "PR_4", "PR_5", "PR_6"]);
+  });
+
+  describe("refreshing", () => {
+    let clock = 0;
+    const board = (harness: ReturnType<typeof setup>["harness"], refresh = false) =>
+      harness.behavior.callRpc("board", { refresh }) as Promise<{ cards: Array<{ number: number; checks: string }>; fetchedAt: string }>;
+    const since = (runner: ReturnType<typeof setup>["runner"], start: number) => {
+      const variables = runner.graphqlVariables().slice(start);
+      return { lists: variables.filter((entry) => entry.q !== undefined).length, ids: variables.flatMap((entry) => entry.ids ?? []) };
+    };
+    beforeEach(() => {
+      clock = Date.parse("2026-10-14T12:00:00Z");
     });
-    expect(searches.every((q) => q.startsWith("is:pr is:open archived:false repo:acme/app "))).toBe(true);
+
+    it("reuses the last check for a minute, then fetches details only for PRs that changed", async () => {
+      const { harness, runner } = setup(() => clock);
+      await board(harness);
+      let start = runner.graphqlVariables().length;
+      await board(harness);
+      expect(since(runner, start)).toEqual({ lists: 0, ids: [] });
+
+      clock += 61_000;
+      start = runner.graphqlVariables().length;
+      await board(harness);
+      expect(since(runner, start)).toEqual({ lists: 2, ids: [] });
+
+      clock += 61_000;
+      runner.board[2]!.updatedAt = "2026-10-14T12:01:00Z";
+      start = runner.graphqlVariables().length;
+      await board(harness);
+      expect(since(runner, start)).toEqual({ lists: 2, ids: ["PR_3"] });
+    });
+
+    it("updates CI status from the cheap check without fetching details", async () => {
+      const { harness, runner } = setup(() => clock);
+      await board(harness);
+      clock += 61_000;
+      runner.board[0]!.commits = { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] };
+      const start = runner.graphqlVariables().length;
+      const result = await board(harness);
+      expect(since(runner, start).ids).toEqual([]);
+      expect(result.cards.find((card) => card.number === 1)?.checks).toBe("failure");
+    });
+
+    it("fetches every PR again on Refresh and every 15 minutes", async () => {
+      const { harness, runner } = setup(() => clock);
+      await board(harness);
+      let start = runner.graphqlVariables().length;
+      await board(harness, true);
+      expect(since(runner, start)).toEqual({ lists: 2, ids: ["PR_1", "PR_2", "PR_3", "PR_4", "PR_5", "PR_6"] });
+
+      clock += 15 * 60_000;
+      start = runner.graphqlVariables().length;
+      await board(harness);
+      expect(since(runner, start).ids).toHaveLength(6);
+    });
+
+    it("checks again right away and refetches a PR after you act on it from PR Board", async () => {
+      const { harness, runner } = setup(() => clock);
+      await board(harness);
+      await harness.behavior.callRpc("postConversationComment", { repo: "acme/app", number: 3, body: "Thanks" });
+      const start = runner.graphqlVariables().length;
+      await board(harness);
+      expect(since(runner, start)).toEqual({ lists: 2, ids: ["PR_3"] });
+    });
+
+    it("checks GitHub on every minute tick even when a check takes a few seconds", async () => {
+      const { harness, runner } = setup(
+        () => clock,
+        (variables) => {
+          if (variables.q !== undefined) clock += 2_000;
+        },
+      );
+      const lists: number[] = [];
+      for (let tick = 0; tick < 4; tick++) {
+        const start = runner.graphqlVariables().length;
+        await board(harness);
+        lists.push(since(runner, start).lists);
+        clock = Date.parse("2026-10-14T12:00:00Z") + (tick + 1) * 60_000;
+      }
+      expect(lists).toEqual([2, 2, 2, 2]);
+    });
+
+    function gatedSetup() {
+      let hold: Promise<void> | null = null;
+      let reached = () => {};
+      let release = () => {};
+      const { harness, runner } = setup(
+        () => clock,
+        (variables) => {
+          if (hold !== null && variables.ids?.includes("PR_5")) {
+            reached();
+            return hold;
+          }
+        },
+      );
+      const arm = () => {
+        const atGate = new Promise<void>((resolve) => {
+          reached = resolve;
+        });
+        hold = new Promise<void>((resolve) => {
+          release = () => {
+            hold = null;
+            resolve();
+          };
+        });
+        return atGate;
+      };
+      return { harness, runner, arm, release: () => release() };
+    }
+
+    it("refetches a PR you acted on even when a check of it was already in flight", async () => {
+      const { harness, runner, arm, release } = gatedSetup();
+      await board(harness);
+      clock += 15 * 60_000;
+      const atGate = arm();
+      const inFlight = board(harness);
+      await atGate;
+      await harness.behavior.callRpc("postConversationComment", { repo: "acme/app", number: 5, body: "Thanks" });
+      release();
+      await inFlight;
+      const start = runner.graphqlVariables().length;
+      await board(harness);
+      expect(since(runner, start)).toEqual({ lists: 2, ids: ["PR_5"] });
+    });
+
+    it("does not hand a board load after an action the check that started before it", async () => {
+      const { harness, runner, arm, release } = gatedSetup();
+      await board(harness);
+      clock += 15 * 60_000;
+      const atGate = arm();
+      const inFlight = board(harness);
+      await atGate;
+      await harness.behavior.callRpc("postConversationComment", { repo: "acme/app", number: 5, body: "Thanks" });
+      const start = runner.graphqlVariables().length;
+      const after = board(harness);
+      await vi.waitFor(() => expect(since(runner, start).lists).toBe(2));
+      release();
+      await Promise.all([inFlight, after]);
+    });
+
+    it("shares one check between board requests that arrive together", async () => {
+      const { harness, runner } = setup(() => clock);
+      await Promise.all([board(harness), board(harness), board(harness)]);
+      expect(since(runner, 0)).toEqual({ lists: 2, ids: ["PR_1", "PR_2", "PR_3", "PR_4", "PR_5", "PR_6"] });
+    });
   });
 });
 

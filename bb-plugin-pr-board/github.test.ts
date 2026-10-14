@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { parseBoardPulls, parseFilePages, pullAwaitingReply, pullConversation, reviewCommentFields } from "./github";
+import { parseBoardPulls, parseFilePages, parseListedPulls, pullAwaitingReply, pullConversation, reviewCommentFields } from "./github";
 
 const NODE = {
+  id: "PR_7",
   repository: { nameWithOwner: "acme/app" },
   number: 7,
   title: "Add thing",
@@ -45,12 +46,14 @@ const NODE = {
   commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] },
 };
 
-const boardRaw = (node: unknown) => JSON.stringify({ data: { search: { nodes: [node] } } });
+const boardRaw = (node: unknown) => JSON.stringify({ data: { nodes: [node, null] } });
 
 describe("parseBoardPulls", () => {
   it("maps the GraphQL board query into snapshots", () => {
     const [pull] = parseBoardPulls(boardRaw(NODE));
+    expect(parseBoardPulls(boardRaw(NODE))).toHaveLength(1);
     expect(pull).toMatchObject({
+      id: "PR_7",
       repo: "acme/app",
       number: 7,
       checks: "failure",
@@ -108,6 +111,25 @@ describe("reviewCommentFields", () => {
       start_line: 2,
       start_side: "LEFT",
     });
+  });
+});
+
+describe("parseListedPulls", () => {
+  it("keeps only each PR's id, last update, and CI state", () => {
+    const raw = JSON.stringify({
+      data: {
+        search: {
+          nodes: [
+            { id: "PR_1", updatedAt: "2026-10-02T00:00:00Z", commits: { nodes: [{ commit: { statusCheckRollup: { state: "PENDING" } } }] } },
+            { id: "PR_2", updatedAt: "2026-10-01T00:00:00Z", commits: { nodes: [] } },
+          ],
+        },
+      },
+    });
+    expect(parseListedPulls(raw)).toEqual([
+      { id: "PR_1", updatedAt: "2026-10-02T00:00:00Z", checks: "pending" },
+      { id: "PR_2", updatedAt: "2026-10-01T00:00:00Z", checks: "none" },
+    ]);
   });
 });
 

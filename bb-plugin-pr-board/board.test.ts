@@ -23,6 +23,7 @@ const review = (author: Actor, at: string, reviewState: ConversationEntry["revie
 
 function pull(overrides: Partial<PullSnapshot> = {}): PullSnapshot {
   return {
+    id: "PR_1",
     repo: "acme/app",
     number: 1,
     title: "Change",

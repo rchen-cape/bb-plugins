@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { UPDATES_CHANNEL } from "../channel";
 import type { BoardCard, Checks, Column, ReviewerState, rpcContract } from "../contract";
@@ -404,11 +404,18 @@ export function BoardView() {
     },
     { persist: true },
   );
-  useRealtime(UPDATES_CHANNEL, board.reload);
-  useEffect(() => {
-    const timer = setInterval(board.reload, REFRESH_MS);
-    return () => clearInterval(timer);
+  const reloadIfVisible = useCallback(() => {
+    if (document.visibilityState === "visible") board.reload();
   }, [board.reload]);
+  useRealtime(UPDATES_CHANNEL, reloadIfVisible);
+  useEffect(() => {
+    const timer = setInterval(reloadIfVisible, REFRESH_MS);
+    document.addEventListener("visibilitychange", reloadIfVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", reloadIfVisible);
+    };
+  }, [reloadIfVisible]);
 
   const [layout, setLayout] = usePreference<Layout>("board-layout", prefersRows() ? "rows" : "columns", LAYOUT_IDS);
   const [scope, setScope] = usePreference<Scope>("board-scope", "all", SCOPE_IDS);

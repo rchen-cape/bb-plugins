@@ -16,6 +16,7 @@ export interface ConversationEntry {
 }
 
 export interface PullSnapshot {
+  id: string;
   repo: string;
   number: number;
   title: string;
@@ -81,6 +82,14 @@ const REVIEWER_STATES: Partial<Record<GitHubReviewState, ReviewerState>> = {
   CHANGES_REQUESTED: "changes-requested",
   COMMENTED: "commented",
 };
+
+export function hasTakenPart(pull: PullSnapshot, login: string): boolean {
+  return (
+    pull.commentAuthors.some((actor) => actor.login === login) ||
+    pull.reviews.some((review) => review.author.login === login) ||
+    pull.unresolvedThreadAuthors.some((authors) => authors.some((actor) => actor.login === login))
+  );
+}
 
 export function isAwaitingReplyFrom(pull: PullSnapshot, login: string): boolean {
   if (pull.unresolvedThreadLastAuthors.some((actor) => actor.login === login)) return true;

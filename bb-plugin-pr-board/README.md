@@ -19,10 +19,14 @@ The **PR Board** sidebar entry lists open PRs that involve you, across every
 repository `gh` can see:
 
 - PRs you opened;
-- PRs that @-mention you;
+- PRs that involve you without you having commented on or reviewed them, such
+  as ones that @-mention you (the **Mentioned** filter);
 - PRs where someone requested your review directly (team requests do not count);
 - PRs you commented on or reviewed where your comment is still the latest, in
   an unresolved review thread or the conversation, so it waits for a reply.
+
+It finds them with two GitHub searches, `involves:@me` and
+`user-review-requested:@me`, each the 30 most recently updated open PRs.
 
 The optional **Repositories** setting (comma-separated `owner/repo`) limits the
 board to those repositories. The PRs are grouped in four columns:
@@ -60,10 +64,22 @@ in this client's local storage.
 
 The last board loads at once, including after a restart, and updates in the
 background: the toolbar shows **Updating…** while it fetches and **Updated
-<time>** after, where the time is when the server last read GitHub. The board
-refreshes every minute and when a review thread changes; the server caches
-GitHub for 30 seconds and **Refresh** skips that cache. It returns to where you
-scrolled.
+<time>** after, where the time is when the server last read GitHub. It returns to
+where you scrolled.
+
+To stay within GitHub's API limit (5,000 GraphQL points an hour, shared with
+everything else that uses your `gh` login), the board refreshes cheaply:
+
+- While the board is on screen it checks every minute, and once when it
+  becomes visible again; it does not check while hidden. The server reuses a
+  check for 50 seconds, so going in and out of the board costs nothing, and
+  live updates from review threads also wait until the board is visible.
+- A check runs the two searches for only each PR's id, last update time, and
+  CI status (about 1 point each). CI status updates the cards directly.
+- Full details (comments, reviews, and the newest 30 review threads) are
+  fetched only for PRs that are new, changed since the last check, or that you
+  acted on from PR Board, and for every PR at least every 15 minutes.
+- **Refresh** checks right away and fetches every PR's details again.
 
 ## Review page
 
@@ -253,9 +269,14 @@ resolve a thread, mark a file viewed, or submit a review.
   show **outdated**, and their lines may have moved.
 - Go to definition needs the review worktree. On the head side it uses the
   checked-out files, so local edits in the worktree can shift gopls results.
-- The board reads the 100 most recently updated open PRs per repository and up
-  to 100 review threads per PR. The Comments tab shows the last 100
-  conversation comments and reviews.
+- The board reads the 30 most recently updated open PRs from each of its two
+  searches and the newest 30 review threads per PR, so counts on PRs with more
+  threads leave out the oldest ones. The review page still reads up to 100
+  review threads, and the Comments tab shows the last 100 conversation comments
+  and reviews.
+- A change GitHub does not count as an update to the PR, such as someone
+  resolving a thread on GitHub, can take up to 15 minutes to show on the board
+  unless you press **Refresh**.
 - Suggestion previews read the address thread's worktree, so they need that
   thread to exist and its environment to be on the bb server machine.
 

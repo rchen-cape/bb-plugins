@@ -28,6 +28,9 @@ bb pr-board suggestions <n | owner/repo#n | PR URL> [--json]
 - `board` prints `column  owner/repo#n  author  threadId-or-dash  title`.
   Columns: `draft`, `open` (no human comments yet), `reviewing` (someone other
   than the author, a bot, or Copilot commented or reviewed), `ready` (approved).
+  Without `--refresh` it reuses the last minute's GitHub check and refetches
+  only changed PRs. `--refresh` fetches every PR again and costs more of the
+  user's GitHub API limit, so use it only when fresh data matters.
 - `open` finds the PR's review thread or starts one, and prints `started` or
   `existing` with the thread id. Starting one spawns an agent, so only run it
   when the user asks for a review thread.
