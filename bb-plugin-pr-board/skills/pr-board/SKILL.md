@@ -38,8 +38,9 @@ bb pr-board suggestions <n | owner/repo#n | PR URL> [--json]
   comments again, and prints `started`, `sent`, or `queued` with the thread id.
   It spawns an agent, so only run it when the user asks.
 - `submit-address` asks the PR's address thread to run the PR's GitHub Actions
-  checks on its accepted changes and, if they pass, commit and push them to the
-  PR branch. It prints `sent` or `queued` with the thread id. It pushes code, so
+  checks on its accepted changes, fix failures only with edits that do not
+  change behavior (formatting, lint, imports, type annotations, generated
+  files), and, if the checks pass, commit and push them to the PR branch. It prints `sent` or `queued` with the thread id. It pushes code, so
   only run it when the user asks.
 - `suggestions` prints `commentId  change:open|applied|dismissed  reply:open|used|dismissed  summary`,
   with `-` for a missing change or reply.

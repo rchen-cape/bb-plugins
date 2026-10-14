@@ -440,7 +440,8 @@ describe("comments", () => {
     await waitFor(() => expect(buttons[3]?.hasAttribute("disabled")).toBe(false));
     fireEvent.click(buttons[3]!);
     const dialog = await slot.findByRole("dialog");
-    expect(dialog.textContent).toContain("If any check fails, it stops without committing or pushing.");
+    expect(dialog.textContent).toContain("it may fix it with edits that don't change behavior");
+    expect(dialog.textContent).toContain("If a check still fails or needs a logic change, it stops without committing or pushing.");
     expect(slot.inspection.rpcCalls.some((call) => call.method === "submitAddress")).toBe(false);
     fireEvent.click(within(dialog).getByRole("button", { name: "Submit Address" }));
     await waitFor(() =>

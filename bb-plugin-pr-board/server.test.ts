@@ -521,7 +521,10 @@ describe("address comments", () => {
     expect(message).toContain("Changed files: a.go, a_test.go");
     expect(message).toContain(".github/workflows/");
     expect(message).toContain("HEAD:thing");
-    expect(message).toContain("never force-push");
+    expect(message.toLowerCase()).toContain("never force-push");
+    expect(message).toContain("edits that keep the code's behavior the same");
+    expect(message).toContain("Do not change logic, tests, or test expectations");
+    expect(message).toContain("commit them separately");
   });
 
   it("posts a conversation comment through gh", async () => {

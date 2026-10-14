@@ -143,11 +143,16 @@ The thread does not edit files. It records suggestions with the
 Each change and reply can be dismissed, and **Show dismissed** brings them back.
 
 **Submit Address** asks you to confirm, then sends the address thread one
-message. The thread does not edit files. It runs the check, lint, typecheck,
-build, and test steps of the repository's pull-request GitHub Actions workflows
-on its worktree and lists what it had to skip. If a check fails, it stops
-without committing or pushing. If they pass, it commits the accepted changes,
-merges new commits from the PR branch (aborting on a conflict), pushes to the
+message. It runs the check, lint, typecheck, build, and test steps of the
+repository's pull-request GitHub Actions workflows on its worktree and lists
+what it had to skip. When a check fails, it may fix it only with edits that do
+not change behavior: formatter output, lint and style fixes, import order,
+unused imports, type annotations, comments, and regenerated files or lockfiles.
+It never changes logic, tests, or test expectations, and never disables rules
+or skips checks. If a check still fails, or needs a logic change, it undoes its
+own fixes and stops without committing or pushing. If they pass, it commits
+the accepted changes, commits its fixes separately and lists them, merges new
+commits from the PR branch (aborting on a conflict), pushes to the
 PR's head branch without force, and watches `gh pr checks`. It never merges the
 pull request. The button needs an address thread, and the server refuses when
 that thread's worktree has no changes.

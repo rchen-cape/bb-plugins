@@ -168,16 +168,16 @@ export function addressMessage(pull: PullDetail, withList: boolean): string {
 export function submitAddressMessage(pull: PullDetail, changedFiles: readonly string[]): string {
   return [
     `The user clicked Submit Address. Check, commit, and push the changes they accepted, to the PR's head branch \`${pull.headRefName}\` of ${pull.repo}#${pull.number}.`,
-    "Do not edit, create, or delete any files yourself, and never force-push. The worktree must hold exactly what the user accepted.",
+    "Never force-push. The only edits you may make are ones that do not change what the code does, to get the checks to pass (step 3).",
     "",
     `Changed files: ${changedFiles.join(", ")}`,
     "",
     "1. Run `git status` and `git diff` to see the accepted changes.",
     "2. Make sure they will pass the PR's GitHub Actions: read the workflows in `.github/workflows/` that run on pull requests, and run their check, lint, typecheck, build, and test steps locally in this worktree. Skip steps that deploy or need secrets or services you do not have, and list what you skipped.",
-    "3. If any check fails, stop: do not change files, commit, or push. Report each failure with its output.",
-    "4. If every check passes, commit all the changes with a message that names the comments they address.",
+    "3. If a check fails, you may fix it only with edits that keep the code's behavior the same: formatter output, lint auto-fixes and style fixes, import order, unused imports, type annotations, comments, and regenerating generated files or lockfiles the checks expect. Run the checks again after fixing. Do not change logic, tests, or test expectations, and do not disable rules, skip checks, or add ignore comments. If a check still fails, or passing it needs a logic change, stop: undo your own fixes (keep the accepted changes), do not commit or push, and report each failure with its output.",
+    "4. If every check passes, commit the accepted changes with a message that names the comments they address. If you made fixes in step 3, commit them separately afterwards with a message that lists each one.",
     `5. Fetch the PR branch and merge it into this branch if it has new commits. If the merge conflicts, run \`git merge --abort\` and stop without pushing. If the merge brought new commits, run the checks again and stop on a failure.`,
     `6. Push to \`${pull.headRefName}\` on the remote \`gh pr checkout\` set as this branch's upstream (\`git rev-parse --abbrev-ref @{upstream}\`), for example \`git push <remote> HEAD:${pull.headRefName}\`. Do not push anywhere else and do not merge the pull request.`,
-    `7. Watch the PR's checks with \`gh pr checks ${pull.number} -R ${pull.repo} --watch\` and report the commit sha, what you ran and skipped, and the result of each check.`,
+    `7. Watch the PR's checks with \`gh pr checks ${pull.number} -R ${pull.repo} --watch\` and report the commit shas, what you ran and skipped, every fix you made in step 3 and why, and the result of each check.`,
   ].join("\n");
 }
