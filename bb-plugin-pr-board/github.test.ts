@@ -5,10 +5,10 @@ describe("parseBoardPulls", () => {
   it("maps the GraphQL board query into snapshots", () => {
     const raw = JSON.stringify({
       data: {
-        repository: {
-          pullRequests: {
+        search: {
             nodes: [
               {
+                repository: { nameWithOwner: "acme/app" },
                 number: 7,
                 title: "Add thing",
                 url: "https://github.com/acme/app/pull/7",
@@ -31,15 +31,19 @@ describe("parseBoardPulls", () => {
                 latestReviews: { nodes: [{ state: "COMMENTED", author: { __typename: "Bot", login: "copilot-pull-request-reviewer", avatarUrl: "https://c" } }] },
                 reviews: { nodes: [{ state: "COMMENTED", author: null }] },
                 comments: { nodes: [{ author: { __typename: "User", login: "carol" } }] },
-                reviewThreads: { nodes: [{ isResolved: false }, { isResolved: true }] },
+                reviewThreads: {
+                  nodes: [
+                    { isResolved: false, comments: { nodes: [{ author: { __typename: "User", login: "dave" } }] } },
+                    { isResolved: true, comments: { nodes: [{ author: { __typename: "User", login: "erin" } }] } },
+                  ],
+                },
                 commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] },
               },
             ],
-          },
         },
       },
     });
-    const [pull] = parseBoardPulls("acme/app", raw);
+    const [pull] = parseBoardPulls(raw);
     expect(pull).toMatchObject({
       repo: "acme/app",
       number: 7,
@@ -49,6 +53,7 @@ describe("parseBoardPulls", () => {
       reviews: [],
       commentAuthors: [{ login: "carol", isBot: false }],
       unresolvedThreads: 1,
+      unresolvedThreadLastAuthors: [{ login: "dave", isBot: false }],
     });
   });
 });

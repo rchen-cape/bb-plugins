@@ -25,11 +25,11 @@ export interface PullSnapshot {
   reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | null;
   checks: Checks;
   requestedReviewers: Person[];
-  requestedTeams: string[];
   latestReviews: Array<{ author: Actor; state: GitHubReviewState }>;
   reviews: Array<{ author: Actor; state: GitHubReviewState }>;
   commentAuthors: Actor[];
   unresolvedThreads: number;
+  unresolvedThreadLastAuthors: Actor[];
 }
 
 export function isAutomated(actor: Actor): boolean {
@@ -73,16 +73,9 @@ const REVIEWER_STATES: Partial<Record<GitHubReviewState, ReviewerState>> = {
   COMMENTED: "commented",
 };
 
-export interface Viewer {
-  login: string;
-  teams: ReadonlySet<string>;
-}
-
-export function isRequestedFrom(pull: PullSnapshot, viewer: Viewer): boolean {
-  if (pull.author?.login === viewer.login) return false;
-  if (pull.requestedReviewers.some((person) => person.login === viewer.login)) return true;
-  const reviewed = pull.latestReviews.some((review) => review.author.login === viewer.login);
-  return !reviewed && pull.requestedTeams.some((team) => viewer.teams.has(team));
+export function isAwaitingReplyFrom(pull: PullSnapshot, login: string): boolean {
+  if (pull.unresolvedThreadLastAuthors.some((actor) => actor.login === login)) return true;
+  return pull.commentAuthors.filter((actor) => !isAutomated(actor)).at(-1)?.login === login;
 }
 
 export function reviewersOf(pull: PullSnapshot): Array<Person & { state: ReviewerState }> {

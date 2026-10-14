@@ -53,7 +53,9 @@ export const boardCardSchema = z.object({
   humanComments: z.number().int().nonnegative(),
   unresolvedThreads: z.number().int().nonnegative(),
   isAuthor: z.boolean(),
+  isMentioned: z.boolean(),
   isRequested: z.boolean(),
+  isAwaitingReply: z.boolean(),
   agent: agentSchema,
 });
 export type BoardCard = z.infer<typeof boardCardSchema>;
@@ -63,7 +65,7 @@ const boardSchema = z.object({
   repos: z.array(repoSchema),
   fetchedAt: z.string(),
   cards: z.array(boardCardSchema),
-  errors: z.array(z.object({ repo: z.string(), message: z.string() })),
+  errors: z.array(z.object({ search: z.string(), message: z.string() })),
 });
 export type Board = z.infer<typeof boardSchema>;
 

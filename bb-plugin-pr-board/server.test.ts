@@ -43,6 +43,47 @@ const VIEWED_RESPONSE = {
   },
 };
 
+function searchNode(number: number, overrides: { author?: string; comments?: string[]; threadLast?: string[] } = {}) {
+  const user = (login: string) => ({ __typename: "User", login, avatarUrl: null });
+  return {
+    repository: { nameWithOwner: "acme/app" },
+    number,
+    title: `PR ${number}`,
+    url: `https://github.com/acme/app/pull/${number}`,
+    isDraft: false,
+    createdAt: "2026-10-01T00:00:00Z",
+    updatedAt: `2026-10-0${number}T00:00:00Z`,
+    headRefName: "b",
+    baseRefName: "main",
+    additions: 1,
+    deletions: 0,
+    changedFiles: 1,
+    reviewDecision: null,
+    author: user(overrides.author ?? "alice"),
+    reviewRequests: { nodes: [] },
+    latestReviews: { nodes: [] },
+    reviews: { nodes: [] },
+    comments: { nodes: (overrides.comments ?? []).map((login) => ({ author: user(login) })) },
+    reviewThreads: {
+      nodes: (overrides.threadLast ?? []).map((login) => ({ isResolved: false, comments: { nodes: [{ author: user(login) }] } })),
+    },
+    commits: { nodes: [] },
+  };
+}
+
+function searchResponse(q: string) {
+  const nodes = q.includes("author:@me")
+    ? [searchNode(1, { author: "me" })]
+    : q.includes("mentions:@me")
+      ? [searchNode(2)]
+      : q.includes("user-review-requested:@me")
+        ? [searchNode(6)]
+      : q.includes("commenter:@me")
+        ? [searchNode(3, { comments: ["me"] }), searchNode(4, { comments: ["me", "alice"] })]
+        : [searchNode(5, { threadLast: ["me"] })];
+  return { data: { search: { nodes } } };
+}
+
 function fakeRunner() {
   const calls: Array<{ command: string; args: readonly string[]; options: RunOptions }> = [];
   const run = vi.fn(async (command: string, args: readonly string[], options: RunOptions) => {
@@ -51,8 +92,10 @@ function fakeRunner() {
       if (command === "gh") return "gh version 2";
       throw new Error("not installed");
     }
+    if (args[0] === "api" && args[1] === "user") return "me\n";
     if (args[0] === "api" && args[1] === "graphql") {
-      const { query } = JSON.parse(options.input ?? "{}") as { query: string };
+      const { query, variables } = JSON.parse(options.input ?? "{}") as { query: string; variables: { q?: string } };
+      if (variables.q !== undefined) return JSON.stringify(searchResponse(variables.q));
       return JSON.stringify(query.includes("viewerViewedState") ? VIEWED_RESPONSE : PULL_RESPONSE);
     }
     if (args.includes("--paginate")) {
@@ -145,6 +188,29 @@ describe("parsePullArgument", () => {
     ["twelve", null],
   ])("parses %s", (value, expected) => {
     expect(parsePullArgument(value, "acme/default")).toEqual(expected);
+  });
+});
+
+describe("board", () => {
+  it("shows my PRs, PRs mentioning me or requesting my review, and PRs where my comment is still the latest", async () => {
+    const { harness, runner } = setup();
+    const board = (await harness.behavior.callRpc("board", { refresh: false })) as {
+      viewer: string;
+      cards: Array<{ number: number; isAuthor: boolean; isMentioned: boolean; isRequested: boolean; isAwaitingReply: boolean }>;
+    };
+    expect(board.viewer).toBe("me");
+    expect(board.cards.map((card) => [card.number, card.isAuthor, card.isMentioned, card.isRequested, card.isAwaitingReply])).toEqual([
+      [6, false, false, true, false],
+      [5, false, false, false, true],
+      [3, false, false, false, true],
+      [2, false, true, false, false],
+      [1, true, false, false, false],
+    ]);
+    const searches = runner.calls.flatMap((call) => {
+      const q = (JSON.parse(call.options.input ?? "{}") as { variables?: { q?: string } }).variables?.q;
+      return q === undefined ? [] : [q];
+    });
+    expect(searches.every((q) => q.startsWith("is:pr is:open archived:false repo:acme/app "))).toBe(true);
   });
 });
 

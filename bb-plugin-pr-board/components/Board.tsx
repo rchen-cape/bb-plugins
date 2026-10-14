@@ -18,13 +18,15 @@ const COLUMNS: ReadonlyArray<{ id: Column; title: string; hint: string }> = [
   { id: "ready", title: "Ready", hint: "Approved" },
 ];
 
-type Scope = "all" | "requested" | "mine";
+type Scope = "all" | "mine" | "requested" | "mentioned" | "awaiting";
 type Layout = "columns" | "rows";
 
 const SCOPES: ReadonlyArray<{ id: Scope; label: string }> = [
   { id: "all", label: "All" },
-  { id: "requested", label: "Requested" },
   { id: "mine", label: "Mine" },
+  { id: "requested", label: "Requested" },
+  { id: "mentioned", label: "Mentioned" },
+  { id: "awaiting", label: "Awaiting reply" },
 ];
 const SCOPE_IDS = SCOPES.map((scope) => scope.id);
 const LAYOUTS: ReadonlyArray<{ id: Layout; label: string; icon: string }> = [
@@ -60,8 +62,10 @@ function prefersRows(): boolean {
 }
 
 function matches(card: BoardCard, query: string, scope: Scope): boolean {
-  if (scope === "requested" && !card.isRequested) return false;
   if (scope === "mine" && !card.isAuthor) return false;
+  if (scope === "requested" && !card.isRequested) return false;
+  if (scope === "mentioned" && !card.isMentioned) return false;
+  if (scope === "awaiting" && !card.isAwaitingReply) return false;
   if (query.length === 0) return true;
   const haystack = `${cardKey(card)} ${card.title} ${card.author.login} ${card.headRefName}`.toLowerCase();
   return query
@@ -469,7 +473,7 @@ export function BoardView() {
         ) : null}
         <span className="ml-auto flex items-center gap-2">
           <span className="hidden text-xs text-muted-foreground sm:inline">
-            {repos.join(", ")} as {viewer}
+            {repos.length === 0 ? "All repositories" : repos.join(", ")} as {viewer}
           </span>
           <UpdatedIndicator fetchedAt={fetchedAt} refreshing={board.refreshing} error={board.error} onRetry={refresh} />
           <Button size="sm" variant="outline" onClick={refresh} disabled={board.refreshing}>
@@ -479,8 +483,8 @@ export function BoardView() {
         </span>
       </div>
       {errors.map((error) => (
-        <p key={error.repo} className="shrink-0 px-5 pt-2 text-sm text-destructive">
-          {error.repo}: {error.message}
+        <p key={error.search} className="shrink-0 px-5 pt-2 text-sm text-destructive">
+          {error.search}: {error.message}
         </p>
       ))}
       <div

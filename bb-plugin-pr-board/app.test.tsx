@@ -52,7 +52,9 @@ function card(overrides: Partial<BoardCard>): BoardCard {
     humanComments: 0,
     unresolvedThreads: 0,
     isAuthor: false,
+    isMentioned: false,
     isRequested: false,
+    isAwaitingReply: false,
     agent: { threadId: null, running: false, findings: 0 },
     ...overrides,
   };
@@ -65,7 +67,7 @@ const BOARD: Board = {
   errors: [],
   cards: [
     card({ number: 1, title: "Draft work", column: "draft" }),
-    card({ number: 2, title: "Needs eyes", column: "open", isRequested: true }),
+    card({ number: 2, title: "Needs eyes", column: "open", isMentioned: true }),
     card({ number: 3, title: "Under review", column: "reviewing", humanComments: 2, agent: { threadId: "thr_3", running: false, findings: 4 } }),
     card({ number: 4, title: "Approved one", column: "ready", isAuthor: true }),
   ],
@@ -142,7 +144,7 @@ describe("board", () => {
     for (const title of ["Draft", "Open", "Reviewing", "Ready"]) expect(await slot.findByRole("region", { name: title })).toBeTruthy();
     expect(slot.getByText("4 findings")).toBeTruthy();
 
-    fireEvent.click(slot.getByRole("button", { name: "Requested" }));
+    fireEvent.click(slot.getByRole("button", { name: "Mentioned" }));
     expect(slot.queryByText("Draft work")).toBeNull();
     expect(slot.getByText("Needs eyes")).toBeTruthy();
 

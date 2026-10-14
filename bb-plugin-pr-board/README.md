@@ -15,8 +15,17 @@ optional; with it, ⌘-click on Go code resolves definitions exactly.
 
 ## Board
 
-The **PR Board** sidebar entry lists the open PRs of the configured
-repositories in four columns:
+The **PR Board** sidebar entry lists open PRs that involve you, across every
+repository `gh` can see:
+
+- PRs you opened;
+- PRs that @-mention you;
+- PRs where someone requested your review directly (team requests do not count);
+- PRs you commented on or reviewed where your comment is still the latest, in
+  an unresolved review thread or the conversation, so it waits for a reply.
+
+The optional **Repositories** setting (comma-separated `owner/repo`) limits the
+board to those repositories. The PRs are grouped in four columns:
 
 | Column | PRs |
 | --- | --- |
@@ -28,8 +37,7 @@ repositories in four columns:
 Each card shows the number, title, author, age, size, CI status, reviewers
 (ring color: green approved, red changes requested, blue commented, grey
 requested), comment count, unresolved threads, and the review thread's state.
-Filter by text, or by **Requested** (review requested from you or one of your
-teams, until you review) and **Mine**.
+Filter by text, or by **Mine**, **Requested**, **Mentioned**, and **Awaiting reply**.
 
 **Columns** lays the groups out side by side; **Rows** stacks them, each a grid
 of cards that wraps to the page width, so the page scrolls down. Rows is the

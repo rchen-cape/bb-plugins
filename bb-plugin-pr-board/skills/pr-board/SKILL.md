@@ -5,8 +5,10 @@ description: List open PRs by board column, open or re-run a PR's review thread,
 
 # PR Board
 
-PR Board shows the open PRs of its configured repositories in four columns and
-opens one review thread per PR. A review thread works in a worktree on the PR's
+PR Board shows open PRs the signed-in `gh` user opened, is @-mentioned in, is directly requested to
+review, or commented on or reviewed with their comment still the latest, in four columns,
+and opens one review thread per PR. The optional Repositories setting limits it
+to those repositories. A review thread works in a worktree on the PR's
 head, summarizes the PR, then runs `/thermo-nuclear-code-quality-review`.
 
 ## Commands
@@ -28,7 +30,8 @@ bb pr-board findings <n | owner/repo#n | PR URL> [--json]
   the agent is busy.
 - `findings` prints `severity  path:start-end  side  open|dismissed  title`.
 
-A bare number uses the first configured repository.
+A bare number uses the first repository in the Repositories setting, and needs
+that setting.
 
 ## Recording findings
 

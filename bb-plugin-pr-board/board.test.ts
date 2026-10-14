@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { columnFor, humanFeedbackCount, isAutomated, isRequestedFrom, reviewersOf, type Actor, type PullSnapshot } from "./board";
+import { columnFor, humanFeedbackCount, isAutomated, isAwaitingReplyFrom, reviewersOf, type Actor, type PullSnapshot } from "./board";
 
 const human = (login: string): Actor => ({ login, avatarUrl: null, isBot: false });
 const bot = (login: string): Actor => ({ login, avatarUrl: null, isBot: true });
@@ -22,11 +22,11 @@ function pull(overrides: Partial<PullSnapshot> = {}): PullSnapshot {
     reviewDecision: null,
     checks: "none",
     requestedReviewers: [],
-    requestedTeams: [],
     latestReviews: [],
     reviews: [],
     commentAuthors: [],
     unresolvedThreads: 0,
+    unresolvedThreadLastAuthors: [],
     ...overrides,
   };
 }
@@ -120,19 +120,14 @@ describe("reviewersOf", () => {
   });
 });
 
-describe("isRequestedFrom", () => {
-  const me = { login: "me", teams: new Set(["acme/core"]) };
-
-  it("counts direct requests and team requests until you review", () => {
-    expect(isRequestedFrom(pull({ requestedReviewers: [{ login: "me", avatarUrl: null }] }), me)).toBe(true);
-    expect(isRequestedFrom(pull({ requestedTeams: ["acme/core"] }), me)).toBe(true);
-    expect(isRequestedFrom(pull({ requestedTeams: ["acme/other"] }), me)).toBe(false);
-    expect(
-      isRequestedFrom(pull({ requestedTeams: ["acme/core"], latestReviews: [{ author: human("me"), state: "COMMENTED" }] }), me),
-    ).toBe(false);
+describe("isAwaitingReplyFrom", () => {
+  it("is true while my comment is the latest in an unresolved thread or the conversation", () => {
+    expect(isAwaitingReplyFrom(pull({ unresolvedThreadLastAuthors: [human("other"), human("me")] }), "me")).toBe(true);
+    expect(isAwaitingReplyFrom(pull({ commentAuthors: [human("other"), human("me"), bot("github-actions")] }), "me")).toBe(true);
   });
 
-  it("never counts the author, whom CODEOWNERS teams often include", () => {
-    expect(isRequestedFrom(pull({ author: human("me"), requestedTeams: ["acme/core"] }), me)).toBe(false);
+  it("is false once someone replies", () => {
+    expect(isAwaitingReplyFrom(pull({ unresolvedThreadLastAuthors: [human("other")] }), "me")).toBe(false);
+    expect(isAwaitingReplyFrom(pull({ commentAuthors: [human("me"), human("other")] }), "me")).toBe(false);
   });
 });

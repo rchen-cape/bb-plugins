@@ -60,17 +60,18 @@ function toActor(actor: z.infer<typeof actorSchema>): Actor {
 
 const reviewStateSchema = z.enum(["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING"]);
 
-export const BOARD_QUERY = `query($owner: String!, $name: String!) {
-  repository(owner: $owner, name: $name) {
-    pullRequests(states: OPEN, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
-      nodes {
+export const BOARD_QUERY = `query($q: String!) {
+  search(type: ISSUE, query: $q, first: 100) {
+    nodes {
+      ... on PullRequest {
         number title url isDraft createdAt updatedAt headRefName baseRefName additions deletions changedFiles reviewDecision
+        repository { nameWithOwner }
         author { __typename login avatarUrl(size: 40) }
-        reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login avatarUrl(size: 40) } ... on Team { combinedSlug } } } }
+        reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login avatarUrl(size: 40) } } } }
         latestReviews(first: 20) { nodes { state author { __typename login avatarUrl(size: 40) } } }
         reviews(last: 50) { nodes { state author { __typename login } } }
         comments(last: 50) { nodes { author { __typename login } } }
-        reviewThreads(first: 100) { nodes { isResolved } }
+        reviewThreads(first: 100) { nodes { isResolved comments(last: 1) { nodes { author { __typename login } } } } }
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
       }
     }
@@ -79,10 +80,10 @@ export const BOARD_QUERY = `query($owner: String!, $name: String!) {
 
 const boardSchema = z.object({
   data: z.object({
-    repository: z.object({
-      pullRequests: z.object({
+    search: z.object({
         nodes: z.array(
           z.object({
+            repository: z.object({ nameWithOwner: z.string() }),
             number: z.number(),
             title: z.string(),
             url: z.string(),
@@ -104,7 +105,6 @@ const boardSchema = z.object({
                       __typename: z.string(),
                       login: z.string().optional(),
                       avatarUrl: z.string().optional(),
-                      combinedSlug: z.string().optional(),
                     })
                     .nullable(),
                 }),
@@ -117,7 +117,14 @@ const boardSchema = z.object({
               nodes: z.array(z.object({ state: reviewStateSchema, author: actorSchema.nullable() })),
             }),
             comments: z.object({ nodes: z.array(z.object({ author: actorSchema.nullable() })) }),
-            reviewThreads: z.object({ nodes: z.array(z.object({ isResolved: z.boolean() })) }),
+            reviewThreads: z.object({
+              nodes: z.array(
+                z.object({
+                  isResolved: z.boolean(),
+                  comments: z.object({ nodes: z.array(z.object({ author: actorSchema.nullable() })) }),
+                }),
+              ),
+            }),
             commits: z.object({
               nodes: z.array(
                 z.object({
@@ -127,7 +134,6 @@ const boardSchema = z.object({
             }),
           }),
         ),
-      }),
     }),
   }),
 });
@@ -144,9 +150,9 @@ function withAuthor<T extends { author: z.infer<typeof actorSchema> | null }>(no
   return nodes.flatMap((node) => (node.author === null ? [] : [{ ...node, author: toActor(node.author) }]));
 }
 
-export function parseBoardPulls(repo: string, raw: string): PullSnapshot[] {
-  return boardSchema.parse(JSON.parse(raw)).data.repository.pullRequests.nodes.map((node) => ({
-    repo,
+export function parseBoardPulls(raw: string): PullSnapshot[] {
+  return boardSchema.parse(JSON.parse(raw)).data.search.nodes.map((node) => ({
+    repo: node.repository.nameWithOwner,
     number: node.number,
     title: node.title,
     url: node.url,
@@ -166,13 +172,14 @@ export function parseBoardPulls(repo: string, raw: string): PullSnapshot[] {
         ? [{ login: reviewer.login, avatarUrl: reviewer.avatarUrl ?? null }]
         : [],
     ),
-    requestedTeams: node.reviewRequests.nodes.flatMap(({ requestedReviewer: reviewer }) =>
-      reviewer?.__typename === "Team" && reviewer.combinedSlug !== undefined ? [reviewer.combinedSlug] : [],
-    ),
     latestReviews: withAuthor(node.latestReviews.nodes),
     reviews: withAuthor(node.reviews.nodes),
     commentAuthors: withAuthor(node.comments.nodes).map((comment) => comment.author),
     unresolvedThreads: node.reviewThreads.nodes.filter((thread) => !thread.isResolved).length,
+    unresolvedThreadLastAuthors: node.reviewThreads.nodes.flatMap((thread) => {
+      const author = thread.comments.nodes.at(-1)?.author;
+      return thread.isResolved || author === null || author === undefined ? [] : [toActor(author)];
+    }),
   }));
 }
 
@@ -338,8 +345,8 @@ export function createGitHub(gh: Gh) {
   }
 
   return {
-    async boardPulls(repo: string): Promise<PullSnapshot[]> {
-      return parseBoardPulls(repo, await graphql(BOARD_QUERY, split(repo)));
+    async searchPulls(query: string): Promise<PullSnapshot[]> {
+      return parseBoardPulls(await graphql(BOARD_QUERY, { q: query }));
     },
 
     async pullDetail(repo: string, number: number): Promise<PullDetail> {
