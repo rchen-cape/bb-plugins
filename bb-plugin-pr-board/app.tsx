@@ -1,8 +1,8 @@
 import { definePluginApp, type PluginNavPanelProps } from "@get-bb/plugin-sdk/app";
 import { BoardView } from "./components/Board";
-import { ReviewThreadTab, ThreadDiffButton } from "./components/ThreadPanels";
+import { AddressThreadTab, ReviewThreadTab, ThreadDiffButton } from "./components/ThreadPanels";
 import { ReviewWorkspace } from "./components/Workspace";
-import { BOARD_PANEL, REVIEW_THREAD_TAB, parseWorkspacePath } from "./routes";
+import { ADDRESS_THREAD_TAB, BOARD_PANEL, REVIEW_THREAD_TAB, parseWorkspacePath } from "./routes";
 
 function BoardPanel({ subPath }: PluginNavPanelProps) {
   const pull = parseWorkspacePath(subPath);
@@ -16,7 +16,10 @@ export default definePluginApp((app) => {
     icon: "GitPullRequest",
     path: BOARD_PANEL,
     component: BoardPanel,
-    fixedTabs: [{ ...REVIEW_THREAD_TAB, title: "Review thread", icon: "MessageSquare", component: ReviewThreadTab, layout: "flush" }],
+    fixedTabs: [
+      { ...REVIEW_THREAD_TAB, title: "Review thread", icon: "MessageSquare", component: ReviewThreadTab, layout: "flush" },
+      { ...ADDRESS_THREAD_TAB, title: "Address thread", icon: "MessageCirclePlus", component: AddressThreadTab, layout: "flush" },
+    ],
   });
   app.slots.experimental_threadHeaderAction({
     id: "review-diff",

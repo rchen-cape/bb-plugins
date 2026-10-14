@@ -7,8 +7,11 @@ side-by-side diff.
 - A review page per PR: changed files, a side-by-side diff, inline GitHub
   comments, pending review comments, and the agent's findings highlighted in
   amber.
-- A review thread per PR that summarizes the change and runs
-  `/thermo-nuclear-code-quality-review`.
+- A review thread per PR, started with **Run review**, that summarizes the
+  change and runs `/thermo-nuclear-code-quality-review`.
+- A Comments tab, and an **Address comments** thread that suggests code changes
+  and replies for each comment. You accept a change into the thread's worktree,
+  or use a reply as the start of your own.
 - ⌘-click go to definition, using gopls for Go and a definition search for
   other languages.
 

@@ -202,6 +202,12 @@ function PullCard({
                   {card.unresolvedThreads}
                 </span>
               ) : null}
+              {card.unansweredComments > 0 ? (
+                <span className="inline-flex items-center gap-0.5 text-red-600 dark:text-red-400" title="Comments waiting for your reply">
+                  <Icon name="AlertTriangle" className="size-3" aria-hidden />
+                  {card.unansweredComments}
+                </span>
+              ) : null}
               <span className="ml-auto">
                 <AgentBadge card={card} />
               </span>

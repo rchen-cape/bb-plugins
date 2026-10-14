@@ -1,9 +1,9 @@
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { PluginCliError, cliCommand, defineCli, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { columnFor, humanFeedbackCount, isAwaitingReplyFrom, reviewersOf, type PullSnapshot } from "./board.js";
+import { columnFor, humanFeedbackCount, isAwaitingReplyFrom, reviewersOf, unansweredCount, type PullSnapshot } from "./board.js";
 import { UPDATES_CHANNEL } from "./channel.js";
 import {
   rpcContract,
@@ -18,8 +18,18 @@ import {
 import { findDefinitions } from "./definitions.js";
 import { createGitHub, runCommand, type Gh, type Runner } from "./github.js";
 import { createStore, type PullKey } from "./store.js";
+import {
+  SUGGESTIONS_TOOL,
+  addressMessage,
+  addressPrompt,
+  addressThreadTitle,
+  addressableIds,
+  previewEdits,
+  submitAddressMessage,
+  writePreviews,
+} from "./suggestions.js";
 
-export { rpcContract };
+export { SUGGESTIONS_TOOL, rpcContract };
 
 const WORKTREE_PROVIDER_ID = "git-worktree";
 const REVIEW_PROVIDER_ID = "claude-code";
@@ -122,23 +132,6 @@ export function reviewMessage(pull: Pick<PullDetail, "repo" | "number" | "baseRe
   ].join(" ");
 }
 
-export function askMessage(
-  pull: Pick<PullDetail, "repo" | "number" | "headSha" | "mergeBaseSha">,
-  target: { path: string; side: "additions" | "deletions"; startLine: number; endLine: number },
-  code: string | null,
-  question: string,
-): string {
-  const lines = target.startLine === target.endLine ? `line ${target.startLine}` : `lines ${target.startLine}-${target.endLine}`;
-  const version =
-    target.side === "additions" ? `the PR head ${pull.headSha.slice(0, 12)}` : `the merge base ${pull.mergeBaseSha.slice(0, 12)}`;
-  return [
-    `Question from the PR Board diff about ${target.path} ${lines} at ${version}:`,
-    ...(code === null ? [] : ["", "```", code, "```"]),
-    "",
-    question,
-  ].join("\n");
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -148,6 +141,16 @@ export interface PluginDeps {
   pollMs: number;
   now: () => number;
 }
+
+const suggestionInputSchema = z.object({
+  commentId: z.string().min(1),
+  summary: z.string().min(1).max(300),
+  reply: z.string().max(65_000).nullable().optional(),
+  changes: z
+    .array(z.object({ path: z.string().min(1).max(1024), find: z.string().max(200_000), replace: z.string().max(200_000) }))
+    .max(30)
+    .default([]),
+});
 
 const findingInputSchema = z.object({
   path: z.string().min(1).max(1024),
@@ -307,6 +310,14 @@ export function createPlugin(deps: PluginDeps) {
       return null;
     }
 
+    async function addressThreadFor(pull: PullKey) {
+      for (const threadId of store.addressThreadsForPull(pull)) {
+        const thread = await liveThread(threadId);
+        if (thread !== null) return thread;
+      }
+      return null;
+    }
+
     async function agentState(pull: PullKey, findings: number): Promise<AgentState> {
       const thread = await reviewThreadFor(pull);
       return {
@@ -361,6 +372,7 @@ export function createPlugin(deps: PluginDeps) {
             reviewers: reviewersOf(pull),
             humanComments: humanFeedbackCount(pull),
             unresolvedThreads: pull.unresolvedThreads,
+            unansweredComments: unansweredCount(pull, me),
             isAuthor: pull.author?.login === me,
             isMentioned: mentionedKeys.has(pullKey(pull)),
             isRequested: requestedKeys.has(pullKey(pull)),
@@ -407,13 +419,13 @@ export function createPlugin(deps: PluginDeps) {
       }
     }
 
-    async function checkout(path: string, pull: PullDetail): Promise<void> {
+    async function checkout(path: string, pull: PullDetail, fallbackBranch: string): Promise<void> {
       const args = ["pr", "checkout", String(pull.number), "-R", pull.repo];
       try {
         await gh(args, { timeoutMs: 120_000, cwd: path });
       } catch (error) {
-        bb.log.info(`gh pr checkout ${pull.number} failed (${errorMessage(error)}); retrying as review/pr-${pull.number}`);
-        await gh([...args, "--branch", `review/pr-${pull.number}`, "--force"], { timeoutMs: 120_000, cwd: path });
+        bb.log.info(`gh pr checkout ${pull.number} failed (${errorMessage(error)}); retrying as ${fallbackBranch}`);
+        await gh([...args, "--branch", fallbackBranch, "--force"], { timeoutMs: 120_000, cwd: path });
       }
     }
 
@@ -427,16 +439,16 @@ export function createPlugin(deps: PluginDeps) {
       return result.delivery;
     }
 
-    async function prepareAndReview(threadId: string, pull: PullDetail): Promise<void> {
+    async function prepareThen(threadId: string, pull: PullDetail, fallbackBranch: string, next: () => Promise<unknown>): Promise<void> {
       const environment = await worktree(threadId, deps.now() + ENVIRONMENT_TIMEOUT_MS);
       if (environment === null) {
-        bb.log.warn(`the worktree for ${threadId} was not ready; sending the review without gh pr checkout`);
+        bb.log.warn(`the worktree for ${threadId} was not ready; continuing without gh pr checkout`);
       } else {
-        await checkout(environment.path, pull).catch((error: unknown) =>
+        await checkout(environment.path, pull, fallbackBranch).catch((error: unknown) =>
           bb.log.warn(`could not check out ${pullKey(pull)} in ${environment.path}: ${errorMessage(error)}`),
         );
       }
-      if (!disposed.signal.aborted) await sendReview(threadId, pull);
+      if (!disposed.signal.aborted) await next();
     }
 
     async function reviewExecution() {
@@ -457,14 +469,10 @@ export function createPlugin(deps: PluginDeps) {
       };
     }
 
-    const opening = new Map<string, Promise<{ threadId: string; created: boolean }>>();
-    async function openReviewOnce(pull: PullKey): Promise<{ threadId: string; created: boolean }> {
-      const existing = await reviewThreadFor(pull);
-      if (existing !== null) return { threadId: existing.id, created: false };
-      const detail = await pullDetail(pull, true);
-      if (detail.state !== "OPEN") throw new Error(`${pullKey(pull)} is ${detail.state.toLowerCase()}, not open`);
-      const [projectId, hostId, execution] = await Promise.all([resolveProjectId(pull.repo), serverHostId(), reviewExecution()]);
-      const thread = await bb.sdk.threads.spawn({
+    async function spawnPullThread(detail: PullDetail, title: string, prompt: string, pluginMetadata: Record<string, string | number>) {
+      if (detail.state !== "OPEN") throw new Error(`${pullKey(detail)} is ${detail.state.toLowerCase()}, not open`);
+      const [projectId, hostId, execution] = await Promise.all([resolveProjectId(detail.repo), serverHostId(), reviewExecution()]);
+      return bb.sdk.threads.spawn({
         projectId,
         environment: {
           type: "provider",
@@ -473,17 +481,138 @@ export function createPlugin(deps: PluginDeps) {
           inputs: { branch: detail.isCrossRepository ? { kind: "default" } : { kind: "named", name: `origin/${detail.headRefName}` } },
         },
         ...execution,
-        title: reviewThreadTitle(detail),
-        prompt: summaryPrompt(detail),
-        pluginMetadata: { repo: pull.repo, number: pull.number },
+        title,
+        prompt,
+        pluginMetadata,
       });
+    }
+
+    const opening = new Map<string, Promise<{ threadId: string; created: boolean }>>();
+    async function openReviewOnce(pull: PullKey): Promise<{ threadId: string; created: boolean }> {
+      const existing = await reviewThreadFor(pull);
+      if (existing !== null) return { threadId: existing.id, created: false };
+      const detail = await pullDetail(pull, true);
+      const thread = await spawnPullThread(detail, reviewThreadTitle(detail), summaryPrompt(detail), { repo: pull.repo, number: pull.number });
       store.recordThread(thread.id, pull, deps.now());
       publish(pull);
-      void prepareAndReview(thread.id, detail).catch((error: unknown) =>
+      void prepareThen(thread.id, detail, `review/pr-${pull.number}`, () => sendReview(thread.id, detail)).catch((error: unknown) =>
         bb.log.warn(`could not start the review of ${pullKey(pull)} in ${thread.id}: ${errorMessage(error)}`),
       );
       bb.log.info(`started review thread ${thread.id} for ${pullKey(pull)}`);
       return { threadId: thread.id, created: true };
+    }
+
+    async function sendAddress(threadId: string, pull: PullDetail, withList: boolean): Promise<"sent" | "queued"> {
+      const result = await bb.sdk.threads.send({
+        threadId,
+        mode: "auto",
+        input: [{ type: "text", text: addressMessage(pull, withList), mentions: [] }],
+      });
+      publish(pull);
+      return result.delivery;
+    }
+
+    async function updateAddressWorktree(threadId: string, pull: PullDetail): Promise<void> {
+      const environment = await worktree(threadId, null);
+      if (environment === null) throw new Error("The address thread's worktree is not available, so it cannot be updated to the PR's new commits.");
+      const git = (args: string[], timeoutMs = 30_000) => deps.run("git", args, { cwd: environment.path, timeoutMs });
+      const head = async () => (await git(["rev-parse", "HEAD"])).trim();
+      if ((await head()) === pull.headSha) return;
+      await git(["pull", "--ff-only"], 120_000).catch((error: unknown) => {
+        throw new Error(
+          `Could not update the address thread's worktree to the PR's latest commit ${pull.headSha.slice(0, 12)}: ${errorMessage(error)}. Submit or undo the accepted changes that conflict, then try again.`,
+        );
+      });
+      const updated = await head();
+      if (updated !== pull.headSha) {
+        throw new Error(
+          `The address thread's worktree is at ${updated.slice(0, 12)} after pulling, not the PR's latest commit ${pull.headSha.slice(0, 12)}. It may hold local commits that are not pushed.`,
+        );
+      }
+      bb.log.info(`updated the address worktree of ${pullKey(pull)} to ${pull.headSha}`);
+    }
+
+    type AddressResult = { threadId: string; created: boolean; delivery: "sent" | "queued" };
+    const addressing = new Map<string, Promise<AddressResult>>();
+    const preparing = new Set<string>();
+    async function addressOnce(pull: PullKey): Promise<AddressResult> {
+      const detail = await pullDetail(pull, true);
+      const existing = await addressThreadFor(pull);
+      if (existing !== null && preparing.has(existing.id)) return { threadId: existing.id, created: false, delivery: "queued" };
+      if (existing !== null) {
+        await updateAddressWorktree(existing.id, detail);
+        return { threadId: existing.id, created: false, delivery: await sendAddress(existing.id, detail, true) };
+      }
+      const thread = await spawnPullThread(detail, addressThreadTitle(detail), addressPrompt(detail), {
+        repo: pull.repo,
+        number: pull.number,
+        kind: "address",
+      });
+      store.recordAddressThread(thread.id, pull, deps.now());
+      publish(pull);
+      preparing.add(thread.id);
+      void prepareThen(thread.id, detail, `address/pr-${pull.number}`, () => sendAddress(thread.id, detail, false))
+        .catch((error: unknown) =>
+          bb.log.warn(`could not start addressing the comments of ${pullKey(pull)} in ${thread.id}: ${errorMessage(error)}`),
+        )
+        .finally(() => preparing.delete(thread.id));
+      bb.log.info(`started address thread ${thread.id} for ${pullKey(pull)}`);
+      return { threadId: thread.id, created: true, delivery: "queued" };
+    }
+
+    function addressComments(pull: PullKey): Promise<AddressResult> {
+      const key = pullKey(pull);
+      let pending = addressing.get(key);
+      if (pending === undefined) {
+        pending = addressOnce(pull).finally(() => addressing.delete(key));
+        addressing.set(key, pending);
+      }
+      return pending;
+    }
+
+    async function submitAddress(pull: PullKey): Promise<{ threadId: string; delivery: "sent" | "queued" }> {
+      const thread = await addressThreadFor(pull);
+      if (thread === null) throw new Error("This PR has no address thread yet. Click Address comments first.");
+      const environment = await worktree(thread.id, null);
+      if (environment === null) throw new Error("The address thread's worktree is not available.");
+      const status = await deps.run("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: environment.path, timeoutMs: 30_000 });
+      const changed = status
+        .split("\n")
+        .filter((line) => line.trim().length > 0)
+        .map((line) => line.slice(3));
+      if (changed.length === 0) throw new Error("The address thread's worktree has no accepted changes to submit.");
+      const detail = await pullDetail(pull, true);
+      const result = await bb.sdk.threads.send({
+        threadId: thread.id,
+        mode: "auto",
+        input: [{ type: "text", text: submitAddressMessage(detail, changed), mentions: [] }],
+      });
+      publish(pull);
+      return { threadId: thread.id, delivery: result.delivery };
+    }
+
+    async function suggestionTarget(id: string) {
+      const found = store.suggestion(id);
+      if (found === null) throw new Error("That suggestion no longer exists.");
+      return found;
+    }
+
+    let applying: Promise<unknown> = Promise.resolve();
+    function applySuggestion(id: string): Promise<void> {
+      const next = applying.then(async () => {
+        const { suggestion, threadId, pull } = await suggestionTarget(id);
+        if (suggestion.changeState !== "open") throw new Error("This change was already applied or dismissed.");
+        const environment = await worktree(threadId, null);
+        if (environment === null) throw new Error("The address thread's worktree is not available, so the change cannot be applied.");
+        const files = await previewEdits(environment.path, suggestion.edits).catch((error: unknown) => {
+          throw new Error(`This change no longer applies: ${errorMessage(error)}`);
+        });
+        await writePreviews(environment.path, files);
+        store.setChangeState(id, "applied");
+        publish(pull);
+      });
+      applying = next.catch(() => undefined);
+      return next;
     }
 
     function openReview(pull: PullKey): Promise<{ threadId: string; created: boolean }> {
@@ -504,10 +633,16 @@ export function createPlugin(deps: PluginDeps) {
 
     async function reviewState(pull: PullKey) {
       const findings = store.findings(pull);
+      const address = await addressThreadFor(pull);
       return {
         agent: await agentState(pull, findings.filter((finding) => !finding.dismissed).length),
         findings,
         drafts: store.drafts(pull),
+        addressAgent: {
+          threadId: address?.id ?? null,
+          running: address !== null && (address.status === "active" || address.status === "starting"),
+        },
+        suggestions: address === null ? [] : store.suggestions(pull, address.id),
       };
     }
 
@@ -522,7 +657,7 @@ export function createPlugin(deps: PluginDeps) {
           definitions: [],
           message:
             thread === null
-              ? "Go to definition needs the review thread's worktree. Open the review thread first."
+              ? "Go to definition needs the review thread's worktree. Click Run review to start one."
               : "The review worktree is still being prepared. Try again in a moment.",
         };
       }
@@ -556,7 +691,7 @@ export function createPlugin(deps: PluginDeps) {
       fileAt: ({ repo, sha, path }) => fileAt(repo, sha, path),
       externalFile: ({ path }) => externalFile(path),
       reviewState: (pull) => reviewState(pull),
-      pullForThread: ({ threadId }) => store.pullForThread(threadId),
+      pullForThread: ({ threadId }) => store.pullForThread(threadId) ?? store.pullForAddressThread(threadId),
       openReview: (pull) => openReview(pull),
       runReview: (pull) => runReview(pull),
       definition: (input) => definition(input),
@@ -602,25 +737,89 @@ export function createPlugin(deps: PluginDeps) {
         pullCache.delete(pullKey({ repo, number }));
         return {};
       },
-      askAgent: async ({ repo, number, question, ...target }) => {
-        const pull = { repo, number };
-        const [{ threadId }, detail] = await Promise.all([openReview(pull), pullDetail(pull, false)]);
-        const file = detail.files.find((candidate) => candidate.path === target.path);
-        const sourcePath = target.side === "deletions" ? (file?.previousPath ?? target.path) : target.path;
-        const source = await fileAt(repo, target.side === "additions" ? detail.headSha : detail.mergeBaseSha, sourcePath).catch(() => null);
-        const code = source?.content?.split("\n").slice(target.startLine - 1, target.endLine).join("\n") ?? null;
-        const result = await bb.sdk.threads.send({
-          threadId,
-          mode: "auto",
-          input: [{ type: "text", text: askMessage(detail, target, code, question), mentions: [] }],
-        });
-        publish(pull);
-        return { threadId, delivery: result.delivery };
-      },
       dismissFinding: ({ id, dismissed }) => {
         const pull = store.dismissFinding(id, dismissed);
         if (pull !== null) publish(pull);
         return {};
+      },
+      addressComments: (pull) => addressComments(pull),
+      suggestionFiles: async ({ id }) => {
+        const { suggestion, threadId } = await suggestionTarget(id);
+        const environment = await worktree(threadId, null);
+        if (environment === null) return { files: [], error: "The address thread's worktree is not available." };
+        return previewEdits(environment.path, suggestion.edits).then(
+          (files) => ({ files, error: null }),
+          (error: unknown) => ({ files: [], error: `This change no longer applies: ${errorMessage(error)}` }),
+        );
+      },
+      applySuggestion: async ({ id }) => {
+        await applySuggestion(id);
+        return {};
+      },
+      setSuggestionState: async (input) => {
+        const { suggestion, pull } = await suggestionTarget(input.id);
+        if (input.part === "reply") store.setReplyState(input.id, input.state);
+        else if (suggestion.changeState === "applied") throw new Error("This change was already applied.");
+        else store.setChangeState(input.id, input.state);
+        publish(pull);
+        return {};
+      },
+      submitAddress: (pull) => submitAddress(pull),
+      postConversationComment: async ({ repo, number, body }) => {
+        await github.postIssueComment(repo, number, body);
+        invalidatePull({ repo, number });
+        publish({ repo, number });
+        return {};
+      },
+    });
+
+    bb.agents.registerTool({
+      name: SUGGESTIONS_TOOL,
+      description:
+        "Record suggested code changes and replies for this thread's pull request comments so PR Board shows them under each comment. Each call replaces the suggestions recorded before unless replace is false.",
+      instructions: `This thread addresses the comments of a pull request for PR Board without changing files. Call ${SUGGESTIONS_TOOL} once with every suggestion, using the comment ids from the comment list.`,
+      presentation: { label: { pending: "Recording comment suggestions", completed: "Recorded comment suggestions" } },
+      parameters: z.object({
+        suggestions: z.array(suggestionInputSchema).max(200),
+        replace: z.boolean().default(true),
+      }),
+      async execute({ suggestions, replace }, { threadId }) {
+        const pull = store.pullForAddressThread(threadId);
+        if (pull === null) {
+          return { content: [{ type: "text", text: "This thread is not a PR Board address-comments thread." }], isError: true };
+        }
+        const environment = await worktree(threadId, null).catch(() => null);
+        if (environment === null) {
+          return { content: [{ type: "text", text: "This thread's worktree is not ready yet. Try again in a moment." }], isError: true };
+        }
+        const ids = addressableIds(await pullDetail(pull, false));
+        const errors: string[] = [];
+        const normalized = await Promise.all(
+          suggestions.map(async (suggestion, index) => {
+            const label = `suggestion ${index + 1} (${suggestion.commentId})`;
+            const reply = suggestion.reply?.trim() ? suggestion.reply.trim() : null;
+            const edits = suggestion.changes.map((change) => ({ ...change, path: posix.normalize(normalizeFindingPath(change.path, environment.path)) }));
+            if (!ids.has(suggestion.commentId)) errors.push(`${label}: no unresolved code comment or conversation comment by someone else has that id`);
+            if (reply === null && edits.length === 0) errors.push(`${label}: give a reply, changes, or both`);
+            for (const edit of edits) if (edit.find === edit.replace) errors.push(`${label}: an edit to ${edit.path} changes nothing`);
+            await previewEdits(environment.path, edits).catch((error: unknown) => errors.push(`${label}: ${errorMessage(error)}`));
+            return { commentId: suggestion.commentId, summary: suggestion.summary.trim(), reply, edits };
+          }),
+        );
+        if (errors.length > 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Nothing was recorded. Fix these and call ${SUGGESTIONS_TOOL} again with every suggestion, including the ones without errors:\n${errors.join("\n")}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        store.recordSuggestions(threadId, pull, normalized, replace);
+        publish(pull);
+        return `Recorded ${normalized.length} suggestion${normalized.length === 1 ? "" : "s"} for ${pullKey(pull)}. PR Board shows them under each comment.`;
       },
     });
 
@@ -668,9 +867,9 @@ export function createPlugin(deps: PluginDeps) {
     });
 
     bb.agents.configure((context) => {
-      const { repo, number } = context.pluginMetadata;
-      const isReviewThread = typeof repo === "string" && /^[\w.-]+\/[\w.-]+$/.test(repo) && typeof number === "number";
-      return { tools: isReviewThread ? [FINDINGS_TOOL] : [], skills: [SKILL_NAME] };
+      const { repo, number, kind } = context.pluginMetadata;
+      const isPullThread = typeof repo === "string" && /^[\w.-]+\/[\w.-]+$/.test(repo) && typeof number === "number";
+      return { tools: !isPullThread ? [] : kind === "address" ? [SUGGESTIONS_TOOL] : [FINDINGS_TOOL], skills: [SKILL_NAME] };
     });
 
     const jsonOption = { json: { type: "boolean", description: "Print the result as JSON" } } as const;
@@ -744,6 +943,47 @@ export function createPlugin(deps: PluginDeps) {
                     finding.side,
                     finding.dismissed ? "dismissed" : "open",
                     finding.title,
+                  ].join("\t"),
+                ),
+              );
+            },
+          }),
+          address: cliCommand({
+            summary: "Start or re-run a PR's address-comments thread, which suggests code changes and replies for its comments without changing files",
+            positionals: pullPositional,
+            options: jsonOption,
+            async run(input) {
+              const result = await addressComments(await pullArgument(input.positionals.pull));
+              return output(input.options.json, result, [`${result.created ? "started" : result.delivery}\t${result.threadId}`]);
+            },
+          }),
+          "submit-address": cliCommand({
+            summary:
+              "Have a PR's address thread run the PR's GitHub Actions checks on its accepted changes, then commit them and push to the PR branch",
+            positionals: pullPositional,
+            options: jsonOption,
+            async run(input) {
+              const result = await submitAddress(await pullArgument(input.positionals.pull));
+              return output(input.options.json, result, [`${result.delivery}\t${result.threadId}`]);
+            },
+          }),
+          suggestions: cliCommand({
+            summary: "List the comment suggestions recorded for a PR",
+            positionals: pullPositional,
+            options: jsonOption,
+            async run(input) {
+              const pull = await pullArgument(input.positionals.pull);
+              const thread = await addressThreadFor(pull);
+              const suggestions = thread === null ? [] : store.suggestions(pull, thread.id);
+              return output(
+                input.options.json,
+                suggestions,
+                suggestions.map((suggestion) =>
+                  [
+                    suggestion.commentId,
+                    suggestion.edits.length === 0 ? "-" : `change:${suggestion.changeState}`,
+                    suggestion.reply === null ? "-" : `reply:${suggestion.replyState}`,
+                    suggestion.summary,
                   ].join("\t"),
                 ),
               );

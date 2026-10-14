@@ -13,18 +13,26 @@ export function WorkspaceHeader({
   narrow,
   refreshing,
   running,
+  addressing,
+  submittingAddress,
   onShowFindings,
   onRunReview,
+  onAddressComments,
   onSubmit,
+  onSubmitAddress,
 }: {
   detail: PullDetail;
   review: ReviewState;
   narrow: boolean;
   refreshing: boolean;
   running: boolean;
+  addressing: boolean;
+  submittingAddress: boolean;
   onShowFindings(): void;
   onRunReview(): void;
+  onAddressComments(): void;
   onSubmit(): void;
+  onSubmitAddress(): void;
 }) {
   const navigate = useBbNavigate();
   const [showDescription, setShowDescription] = useState(false);
@@ -104,21 +112,55 @@ export function WorkspaceHeader({
           />
           <ToolbarToggle pressed={false} label="GitHub" icon="Github" showLabel={!narrow} onClick={() => openUrl(detail.url)} />
           <span className={cn(narrow && "flex-1")} />
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7 px-2 text-xs"
-            disabled={running}
-            onClick={onRunReview}
-            title="Send /thermo-nuclear-code-quality-review to the review thread"
-          >
-            <Icon name="Play" className="size-3.5" />
-            Run review
-          </Button>
-          <Button size="sm" className="h-7 px-2.5 text-xs" onClick={onSubmit}>
-            Submit review
-            {review.drafts.length > 0 ? <span className="rounded-full bg-background/25 px-1.5 tabular-nums">{review.drafts.length}</span> : null}
-          </Button>
+          <div className="grid shrink-0 grid-cols-2 gap-1">
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 justify-start px-2 text-xs"
+              disabled={running}
+              onClick={onRunReview}
+              title={
+                threadId === null
+                  ? "Start a review thread that summarizes the PR and runs /thermo-nuclear-code-quality-review"
+                  : "Send /thermo-nuclear-code-quality-review to the review thread"
+              }
+            >
+              <Icon name="Play" className="size-3.5" />
+              Run review
+            </Button>
+            <Button size="sm" className="h-7 px-2.5 text-xs" onClick={onSubmit}>
+              Submit review
+              {review.drafts.length > 0 ? <span className="rounded-full bg-background/25 px-1.5 tabular-nums">{review.drafts.length}</span> : null}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 justify-start px-2 text-xs"
+              disabled={addressing}
+              onClick={onAddressComments}
+              title={
+                review.addressAgent.threadId === null
+                  ? "Start a thread that suggests code changes and replies for the PR's comments, without changing files"
+                  : "Ask the address thread to suggest changes and replies for the current comments again"
+              }
+            >
+              <Icon name="MessageCirclePlus" className="size-3.5" />
+              Address comments
+            </Button>
+            <Button
+              size="sm"
+              className="h-7 px-2.5 text-xs"
+              disabled={submittingAddress || review.addressAgent.threadId === null}
+              onClick={onSubmitAddress}
+              title={
+                review.addressAgent.threadId === null
+                  ? "Click Address comments first"
+                  : `Check the accepted changes against the PR's GitHub Actions, then commit and push them to ${detail.headRefName}`
+              }
+            >
+              Submit Address
+            </Button>
+          </div>
         </div>
       </header>
       {showDescription ? (

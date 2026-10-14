@@ -37,7 +37,14 @@ board to those repositories. The PRs are grouped in four columns:
 Each card shows the repository name (unless the board is limited to one
 repository), number, title, author, age, size, CI status, reviewers
 (ring color: green approved, red changes requested, blue commented, grey
-requested), comment count, unresolved threads, and the review thread's state.
+requested), comment count, unresolved threads, comments waiting for your
+reply (red warning sign), and the review thread's state. A comment waits for
+your reply when it is an unresolved code comment whose latest reply is not
+yours, or a conversation comment or review with text posted after your latest
+comment, review with text, approval, change request, or dismissed review.
+Approvals and dismissed reviews do not wait for a reply. On PRs you did not open, only code comments you replied in and
+conversations you posted in count. Comments from bots, GitHub Actions, and
+Copilot do not count.
 Filter by text, or by **Mine**, **Requested**, **Mentioned**, and **Awaiting reply**.
 
 **Columns** lays the groups out side by side; **Rows** stacks them, each a grid
@@ -60,8 +67,9 @@ scrolled.
 
 ## Review page
 
-Click a card to open `/plugins/pr-board/board/pr/<owner>/<repo>/<n>`. If the
-PR has no live review thread, one is started:
+Click a card to open `/plugins/pr-board/board/pr/<owner>/<repo>/<n>`. Opening
+a PR starts no agent. **Run review** starts a review thread when the PR has no
+live one:
 
 - in the project whose git remote matches the repository, or the **Review
   project** setting;
@@ -73,7 +81,8 @@ PR has no live review thread, one is started:
   the checkout and queued behind the summary. The message asks the agent to
   record its findings with the `pr_board_record_findings` tool.
 
-The review thread's chat is the page's **Review thread** panel tab. The
+The review thread's chat is the page's **Review thread** panel tab, and the
+address thread's chat is the **Address thread** tab beside it. The
 **Review diff** button in a review thread's header opens the page from the
 thread.
 
@@ -87,6 +96,12 @@ The page has:
   `k` move between files.
 - **Findings**: the recorded findings, blockers first. Click one to jump to
   its lines. Dismissed findings are hidden until **Show dismissed**.
+- **Comments**: unresolved code comments plus conversation comments from
+  others; comments from bots, GitHub Actions, and Copilot (and code comments
+  they started) are listed but not counted. The tab lists every code comment and conversation comment (and
+  review with text); click one to scroll to it in the main pane, which shows
+  each comment with its replies, a reply box, and the address thread's
+  suggestions.
 - **The diff**: split or unified, wrapped or not, collapsed or the full file.
   Lines a finding covers are shaded amber, darker for blockers and majors;
   lines with a pending comment are shaded violet. Findings, GitHub review
@@ -94,7 +109,48 @@ The page has:
   lines outside the shown hunks, and outdated GitHub comments, are listed
   above the diff.
 - **Description**: the PR body.
-- **Run review**: sends the review command to the thread again.
+- **Run review**: starts the review thread, or sends the review command to it again.
+- **Address comments** (under Run review) and **Submit Address** (under Submit
+  review): see below.
+
+### Addressing comments
+
+**Address comments** starts a separate address thread for the PR, in its own
+`git-worktree` environment on the PR's head (checked out with `gh pr checkout`
+like the review thread). It lists the unresolved code comments and the
+conversation, asks for a short summary, and then, once the checkout is done,
+asks for a suggestion per comment that still needs a response. Clicking it
+again reloads the PR, moves the thread's worktree to the PR's latest commit
+with `git pull --ff-only` (keeping accepted changes), and sends the current
+comments to the same thread; its new suggestions replace the old ones. If the
+worktree cannot fast-forward, for example because an accepted change conflicts
+with the new commits, nothing is sent and git's error is shown.
+
+The thread does not edit files. It records suggestions with the
+`pr_board_record_suggestions` tool, and each suggestion can hold:
+
+- **A change**: edits that each replace one exact piece of a file (or create a
+  new file). The tool checks every edit against the worktree and refuses any
+  whose text is missing or appears more than once. A change that touches more
+  than one file or more than 10 lines starts collapsed: click a file name, which
+  shows its `+` and `−` counts, to see its diff. **Accept change** writes the
+  edits into the address thread's worktree, uncommitted; commit and push from
+  the thread or a terminal. A change that no longer matches the files is refused.
+- **A reply**: **Use reply** puts the text in the comment's reply box, where
+  you can edit it before **Reply** (code comments) or **Comment** (conversation
+  comments, posted as a new PR comment).
+
+Each change and reply can be dismissed, and **Show dismissed** brings them back.
+
+**Submit Address** asks you to confirm, then sends the address thread one
+message. The thread does not edit files. It runs the check, lint, typecheck,
+build, and test steps of the repository's pull-request GitHub Actions workflows
+on its worktree and lists what it had to skip. If a check fails, it stops
+without committing or pushing. If they pass, it commits the accepted changes,
+merges new commits from the PR branch (aborting on a conflict), pushes to the
+PR's head branch without force, and watches `gh pr checks`. It never merges the
+pull request. The button needs an address thread, and the server refuses when
+that thread's worktree has no changes.
 
 The diff layout is **Auto** by default: split when the diff area is at least
 860 pixels wide, unified when it is narrower. **Split** and **Unified** fix it.
@@ -114,9 +170,6 @@ range. The editor offers:
 - **Comment now**: posts a single review comment immediately.
 - **Suggest change**: inserts a GitHub suggestion block with the selected new
   lines.
-- **Ask agent**: sends the text as a question to the review thread, with the
-  selected lines quoted, instead of to GitHub. The answer appears in the
-  **Review thread** tab.
 
 A finding's **Comment** button opens the editor on the finding's lines with its
 title and explanation. **Submit review** posts every pending comment in one
@@ -166,14 +219,18 @@ bb pr-board board [--refresh] [--json]
 bb pr-board open <n | owner/repo#n | PR URL> [--json]
 bb pr-board review <n | owner/repo#n | PR URL> [--json]
 bb pr-board findings <n | owner/repo#n | PR URL> [--json]
+bb pr-board address <n | owner/repo#n | PR URL> [--json]
+bb pr-board submit-address <n | owner/repo#n | PR URL> [--json]
+bb pr-board suggestions <n | owner/repo#n | PR URL> [--json]
 ```
 
 See `skills/pr-board/SKILL.md` for the output formats.
 
 ## Storage
 
-The plugin database keeps the PR of each review thread, the findings, and
-pending comments. Nothing reaches GitHub until you post a comment, reply,
+The plugin database keeps the PR of each review and address thread, the
+findings, the comment suggestions, and pending comments. Accepted changes go
+only to the address thread's worktree. Nothing reaches GitHub until you post a comment, reply,
 resolve a thread, mark a file viewed, or submit a review.
 
 ## Limits
@@ -187,7 +244,10 @@ resolve a thread, mark a file viewed, or submit a review.
 - Go to definition needs the review worktree. On the head side it uses the
   checked-out files, so local edits in the worktree can shift gopls results.
 - The board reads the 100 most recently updated open PRs per repository and up
-  to 100 review threads per PR.
+  to 100 review threads per PR. The Comments tab shows the last 100
+  conversation comments and reviews.
+- Suggestion previews read the address thread's worktree, so they need that
+  thread to exist and its environment to be on the bb server machine.
 
 ## Development
 

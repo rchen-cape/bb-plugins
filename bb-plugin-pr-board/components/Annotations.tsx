@@ -24,7 +24,6 @@ export interface ReviewActions {
   saveDraft(composer: Composer, body: string): Promise<void>;
   deleteDraft(id: string): Promise<void>;
   postComment(target: CommentTarget, body: string): Promise<void>;
-  askAgent(target: CommentTarget, question: string): Promise<void>;
   reply(commentId: number, body: string): Promise<void>;
   resolveThread(threadId: string, resolved: boolean): Promise<void>;
   dismissFinding(id: string, dismissed: boolean): Promise<void>;
@@ -228,7 +227,6 @@ export function CommentEditor({ composer, suggestion, actions }: { composer: Com
   const empty = body.trim().length === 0;
   const save = () => run("draft", () => actions.saveDraft(composer, body));
   const post = () => run("post", () => actions.postComment(composer, body));
-  const ask = () => run("ask", () => actions.askAgent(composer, body));
   return (
     <Card className="border-sky-500/50">
       <p className="mb-2 text-xs text-muted-foreground">
@@ -261,17 +259,6 @@ export function CommentEditor({ composer, suggestion, actions }: { composer: Com
             Suggest change
           </Button>
         )}
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-7 text-xs"
-          disabled={empty || busy !== null}
-          title="Send this question and these lines to the review thread instead of GitHub"
-          onClick={ask}
-        >
-          <Icon name="Bot" className="size-3.5" />
-          {busy === "ask" ? "Asking…" : "Ask agent"}
-        </Button>
         <span className="flex-1" />
         <Button size="sm" variant="ghost" className="h-7" onClick={actions.closeComposer}>
           Cancel

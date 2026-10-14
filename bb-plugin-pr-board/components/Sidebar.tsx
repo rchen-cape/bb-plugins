@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
-import type { Draft, FileStatus, Finding, PullFile, ReviewThread, Severity } from "../contract";
+import type { ConversationComment, Draft, FileStatus, Finding, PullFile, ReviewThread, Severity, Suggestion } from "../contract";
 import { cn } from "../lib/utils";
 import { SeverityBadge, lineLabel } from "./bits";
+import { CommentIndex, commentCount } from "./Comments";
 import { Icon } from "./ui/icon";
 import { Input } from "./ui/input";
 
-export type SidebarTab = "files" | "findings";
+export type SidebarTab = "files" | "findings" | "comments";
 
 const STATUS: Record<FileStatus, { letter: string; className: string }> = {
   added: { letter: "A", className: "text-emerald-600 dark:text-emerald-400" },
@@ -98,22 +99,32 @@ export function Sidebar({
   findings,
   drafts,
   threads,
+  conversation,
+  viewer,
+  suggestions,
+  selectedCommentId,
   tab,
   onTab,
   onSelectFile,
   onToggleViewed,
   onSelectFinding,
+  onSelectComment,
 }: {
   files: readonly PullFile[];
   selectedPath: string | null;
   findings: readonly Finding[];
   drafts: readonly Draft[];
   threads: readonly ReviewThread[];
+  conversation: readonly ConversationComment[];
+  viewer: string;
+  suggestions: readonly Suggestion[];
+  selectedCommentId: string | null;
   tab: SidebarTab;
   onTab(tab: SidebarTab): void;
   onSelectFile(path: string): void;
   onToggleViewed(file: PullFile): void;
   onSelectFinding(finding: Finding): void;
+  onSelectComment(id: string): void;
 }) {
   const [filter, setFilter] = useState("");
   const [showDismissed, setShowDismissed] = useState(false);
@@ -139,7 +150,7 @@ export function Sidebar({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 gap-1 border-b border-border p-1.5" role="tablist">
-        {(["files", "findings"] as const).map((id) => (
+        {(["files", "findings", "comments"] as const).map((id) => (
           <button
             key={id}
             type="button"
@@ -148,7 +159,11 @@ export function Sidebar({
             onClick={() => onTab(id)}
             className="flex-1 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring aria-selected:bg-state-active aria-selected:text-foreground"
           >
-            {id === "files" ? `Files ${viewed}/${files.length}` : `Findings ${open.length}`}
+            {id === "files"
+              ? `Files ${viewed}/${files.length}`
+              : id === "findings"
+                ? `Findings ${open.length}`
+                : `Comments ${commentCount({ threads, conversation, viewer })}`}
           </button>
         ))}
       </div>
@@ -172,6 +187,10 @@ export function Sidebar({
             ))}
           </ul>
         </>
+      ) : tab === "comments" ? (
+        <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+          <CommentIndex detail={{ threads, conversation }} suggestions={suggestions} selectedId={selectedCommentId} onSelect={onSelectComment} />
+        </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
           {listed.length === 0 ? (

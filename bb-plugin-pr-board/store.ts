@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import type { Draft, Finding, Severity, Side } from "./contract.js";
+import { z } from "zod";
+import { changeStateSchema, replyStateSchema, suggestionEditSchema, type Draft, type Finding, type Severity, type Side, type Suggestion, type SuggestionEdit } from "./contract.js";
 
 export interface PullKey {
   repo: string;
@@ -18,6 +19,25 @@ export interface NewFinding {
 }
 
 export type DraftInput = Omit<Draft, "id"> & { id: string | null };
+
+export interface NewSuggestion {
+  commentId: string;
+  summary: string;
+  reply: string | null;
+  edits: SuggestionEdit[];
+}
+
+interface SuggestionRow {
+  id: string;
+  comment_id: string;
+  summary: string;
+  reply: string | null;
+  reply_state: string;
+  edits: string;
+  change_state: string;
+}
+
+const editsSchema = z.array(suggestionEditSchema);
 
 interface FindingRow {
   id: string;
@@ -53,6 +73,18 @@ function toFinding(row: FindingRow): Finding {
     body: row.body,
     headSha: row.head_sha,
     dismissed: row.dismissed === 1,
+  };
+}
+
+function toSuggestion(row: SuggestionRow): Suggestion {
+  return {
+    id: row.id,
+    commentId: row.comment_id,
+    summary: row.summary,
+    reply: row.reply,
+    replyState: replyStateSchema.parse(row.reply_state),
+    edits: editsSchema.parse(JSON.parse(row.edits)),
+    changeState: changeStateSchema.parse(row.change_state),
   };
 }
 
@@ -99,6 +131,27 @@ export function createStore(storage: BbPluginApi["storage"]) {
       created_at INTEGER NOT NULL
     )`,
     `CREATE INDEX drafts_pull ON drafts (repo, number, created_at)`,
+    `CREATE TABLE address_threads (
+      thread_id TEXT PRIMARY KEY,
+      repo TEXT NOT NULL,
+      number INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    )`,
+    `CREATE INDEX address_threads_pull ON address_threads (repo, number, created_at)`,
+    `CREATE TABLE suggestions (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      repo TEXT NOT NULL,
+      number INTEGER NOT NULL,
+      comment_id TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      reply TEXT,
+      reply_state TEXT NOT NULL,
+      edits TEXT NOT NULL,
+      change_state TEXT NOT NULL,
+      position INTEGER NOT NULL
+    )`,
+    `CREATE INDEX suggestions_pull ON suggestions (repo, number, position)`,
   ]);
 
   const statements = {
@@ -135,6 +188,35 @@ export function createStore(storage: BbPluginApi["storage"]) {
     pullForDraft: db.prepare("SELECT repo, number FROM drafts WHERE id = ?"),
     deleteDraft: db.prepare("DELETE FROM drafts WHERE id = ?"),
     clearDrafts: db.prepare("DELETE FROM drafts WHERE repo = ? AND number = ?"),
+    recordAddressThread: db.prepare(
+      "INSERT OR REPLACE INTO address_threads (thread_id, repo, number, created_at) VALUES (?, ?, ?, ?)",
+    ),
+    addressThreadsForPull: db.prepare(
+      "SELECT thread_id FROM address_threads WHERE repo = ? AND number = ? ORDER BY created_at DESC",
+    ),
+    pullForAddressThread: db.prepare("SELECT repo, number FROM address_threads WHERE thread_id = ?"),
+    suggestions: db.prepare(
+      "SELECT id, comment_id, summary, reply, reply_state, edits, change_state FROM suggestions WHERE repo = ? AND number = ? AND thread_id = ? ORDER BY position",
+    ),
+    suggestion: db.prepare(
+      "SELECT id, thread_id, repo, number, comment_id, summary, reply, reply_state, edits, change_state FROM suggestions WHERE id = ?",
+    ),
+    retireSuggestions: db.prepare(
+      `UPDATE suggestions
+       SET change_state = CASE change_state WHEN 'open' THEN 'dismissed' ELSE change_state END,
+           reply_state = CASE reply_state WHEN 'open' THEN 'dismissed' ELSE reply_state END
+       WHERE repo = ? AND number = ? AND (change_state = 'applied' OR reply_state = 'used')`,
+    ),
+    clearSuggestions: db.prepare(
+      "DELETE FROM suggestions WHERE repo = ? AND number = ? AND change_state != 'applied' AND reply_state != 'used'",
+    ),
+    insertSuggestion: db.prepare(
+      `INSERT INTO suggestions (id, thread_id, repo, number, comment_id, summary, reply, reply_state, edits, change_state, position)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, 'open', ?)`,
+    ),
+    maxSuggestionPosition: db.prepare("SELECT COALESCE(MAX(position), -1) AS position FROM suggestions WHERE repo = ? AND number = ?"),
+    setReplyState: db.prepare("UPDATE suggestions SET reply_state = ? WHERE id = ?"),
+    setChangeState: db.prepare("UPDATE suggestions SET change_state = ? WHERE id = ?"),
   };
 
   return {
@@ -202,6 +284,51 @@ export function createStore(storage: BbPluginApi["storage"]) {
     },
     clearDrafts(pull: PullKey): void {
       statements.clearDrafts.run(pull.repo, pull.number);
+    },
+    recordAddressThread(threadId: string, pull: PullKey, now: number): void {
+      statements.recordAddressThread.run(threadId, pull.repo, pull.number, now);
+    },
+    addressThreadsForPull(pull: PullKey): string[] {
+      return (statements.addressThreadsForPull.all(pull.repo, pull.number) as Array<{ thread_id: string }>).map((row) => row.thread_id);
+    },
+    pullForAddressThread(threadId: string): PullKey | null {
+      return (statements.pullForAddressThread.get(threadId) as PullKey | undefined) ?? null;
+    },
+    suggestions(pull: PullKey, threadId: string): Suggestion[] {
+      return (statements.suggestions.all(pull.repo, pull.number, threadId) as SuggestionRow[]).map(toSuggestion);
+    },
+    suggestion(id: string): { suggestion: Suggestion; threadId: string; pull: PullKey } | null {
+      const row = statements.suggestion.get(id) as (SuggestionRow & PullKey & { thread_id: string }) | undefined;
+      if (row === undefined) return null;
+      return { suggestion: toSuggestion(row), threadId: row.thread_id, pull: { repo: row.repo, number: row.number } };
+    },
+    recordSuggestions(threadId: string, pull: PullKey, suggestions: readonly NewSuggestion[], replace: boolean): void {
+      db.transaction(() => {
+        if (replace) {
+          statements.retireSuggestions.run(pull.repo, pull.number);
+          statements.clearSuggestions.run(pull.repo, pull.number);
+        }
+        const start = (statements.maxSuggestionPosition.get(pull.repo, pull.number) as { position: number }).position + 1;
+        suggestions.forEach((suggestion, index) => {
+          statements.insertSuggestion.run(
+            randomUUID(),
+            threadId,
+            pull.repo,
+            pull.number,
+            suggestion.commentId,
+            suggestion.summary,
+            suggestion.reply,
+            JSON.stringify(suggestion.edits),
+            start + index,
+          );
+        });
+      })();
+    },
+    setReplyState(id: string, state: Suggestion["replyState"]): void {
+      statements.setReplyState.run(state, id);
+    },
+    setChangeState(id: string, state: Suggestion["changeState"]): void {
+      statements.setChangeState.run(state, id);
     },
   };
 }

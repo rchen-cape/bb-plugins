@@ -1,0 +1,183 @@
+import { randomUUID } from "node:crypto";
+import { chmod, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, resolve, sep } from "node:path";
+import type { ConversationComment, PullDetail, ReviewThread, SuggestionEdit } from "./contract.js";
+
+export const SUGGESTIONS_TOOL = "pr_board_record_suggestions";
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
+const COMMENT_LIMIT = 1_500;
+
+export interface FilePreview {
+  path: string;
+  before: string | null;
+  after: string;
+}
+
+function truncate(text: string, limit: number): string {
+  return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
+}
+
+export function applyEdit(content: string | null, given: SuggestionEdit): string {
+  const crlf = content !== null && content.includes("\r\n") && !given.find.includes("\r");
+  const edit = crlf ? { ...given, find: given.find.replaceAll("\n", "\r\n"), replace: given.replace.replaceAll("\n", "\r\n") } : given;
+  if (edit.find === "") {
+    if (content !== null) throw new Error(`${edit.path} already exists; give the exact text to replace`);
+    return edit.replace;
+  }
+  if (content === null) throw new Error(`${edit.path} does not exist`);
+  const first = content.indexOf(edit.find);
+  if (first === -1) throw new Error(`the text to replace was not found in ${edit.path}`);
+  if (content.indexOf(edit.find, first + 1) !== -1) {
+    throw new Error(`the text to replace matches more than one place in ${edit.path}; include more surrounding lines`);
+  }
+  return content.slice(0, first) + edit.replace + content.slice(first + edit.find.length);
+}
+
+async function nearestExisting(path: string): Promise<string> {
+  for (let current = path; ; current = dirname(current)) {
+    const real = await realpath(current).catch(() => null);
+    if (real !== null) return real;
+    if (dirname(current) === current) return current;
+  }
+}
+
+async function worktreeFile(root: string, path: string): Promise<string> {
+  if (path.length === 0 || path.startsWith("/") || path.split("/").includes("..")) {
+    throw new Error(`"${path}" is not a repository-relative path`);
+  }
+  const absolute = resolve(root, path);
+  const realRoot = await realpath(root);
+  const container = await nearestExisting(dirname(absolute));
+  if (container !== realRoot && !container.startsWith(`${realRoot}${sep}`)) throw new Error(`"${path}" is outside the worktree`);
+  const link = await lstat(absolute).catch(() => null);
+  if (link?.isSymbolicLink()) throw new Error(`${path} is a symbolic link`);
+  if (link !== null && link.isFile() && link.nlink > 1) throw new Error(`${path} is a hard link`);
+  return absolute;
+}
+
+async function readWorktreeFile(root: string, path: string): Promise<string | null> {
+  const absolute = await worktreeFile(root, path);
+  const info = await stat(absolute).catch(() => null);
+  if (info === null) return null;
+  if (!info.isFile()) throw new Error(`${path} is not a file`);
+  if (info.size > MAX_FILE_BYTES) throw new Error(`${path} is too large to change here`);
+  const bytes = await readFile(absolute);
+  const content = bytes.toString("utf8");
+  if (content.includes("\u0000")) throw new Error(`${path} is a binary file`);
+  if (!Buffer.from(content, "utf8").equals(bytes)) throw new Error(`${path} is not UTF-8 text`);
+  return content;
+}
+
+export async function previewEdits(root: string, edits: readonly SuggestionEdit[]): Promise<FilePreview[]> {
+  const files = new Map<string, FilePreview>();
+  for (const edit of edits) {
+    const file = files.get(edit.path);
+    const before = file === undefined ? await readWorktreeFile(root, edit.path) : file.before;
+    files.set(edit.path, { path: edit.path, before, after: applyEdit(file === undefined ? before : file.after, edit) });
+  }
+  return [...files.values()];
+}
+
+export async function writePreviews(root: string, files: readonly FilePreview[]): Promise<void> {
+  const staged: Array<{ temp: string; absolute: string }> = [];
+  try {
+    for (const file of files) {
+      const absolute = await worktreeFile(root, file.path);
+      await mkdir(dirname(absolute), { recursive: true });
+      const temp = `${absolute}.pr-board-${randomUUID()}.tmp`;
+      staged.push({ temp, absolute });
+      await writeFile(temp, file.after, { encoding: "utf8", flag: "wx" });
+      const existing = await stat(absolute).catch(() => null);
+      if (existing !== null) await chmod(temp, existing.mode & 0o7777);
+    }
+  } catch (error) {
+    await Promise.all(staged.map(({ temp }) => rm(temp, { force: true })));
+    throw error;
+  }
+  for (const { temp, absolute } of staged) await rename(temp, absolute);
+}
+
+export function commentsToAddress(detail: PullDetail): { threads: ReviewThread[]; conversation: ConversationComment[] } {
+  return {
+    threads: detail.threads.filter((thread) => !thread.isResolved && thread.comments.length > 0),
+    conversation: detail.conversation,
+  };
+}
+
+export function addressableIds(detail: PullDetail): Set<string> {
+  const { threads, conversation } = commentsToAddress(detail);
+  return new Set([
+    ...threads.map((thread) => thread.id),
+    ...conversation.filter((comment) => comment.author.login !== detail.viewer).map((comment) => comment.id),
+  ]);
+}
+
+function commentList(detail: PullDetail): string[] {
+  const { threads, conversation } = commentsToAddress(detail);
+  const who = (login: string) => (login === detail.viewer ? `@${login} (you)` : `@${login}`);
+  const body = (text: string) => truncate(text.trim(), COMMENT_LIMIT).replaceAll("\n", "\n    ");
+  const lines: string[] = [];
+  if (threads.length > 0) {
+    lines.push("Unresolved code comments:");
+    for (const thread of threads) {
+      const range = thread.line === null ? "" : thread.startLine !== null && thread.startLine !== thread.line ? ` lines ${thread.startLine}-${thread.line}` : ` line ${thread.line}`;
+      lines.push(`[${thread.id}] ${thread.path}${range}${thread.side === "deletions" ? " (old side)" : ""}${thread.isOutdated ? " (outdated)" : ""}`);
+      for (const comment of thread.comments) lines.push(`  ${who(comment.author.login)}: ${body(comment.body)}`);
+    }
+  }
+  if (conversation.length > 0) {
+    if (lines.length > 0) lines.push("");
+    lines.push("Conversation, oldest first:");
+    for (const comment of conversation) {
+      lines.push(`[${comment.id}] ${who(comment.author.login)}${comment.kind === "review" ? " (review)" : ""}: ${body(comment.body)}`);
+    }
+  }
+  return lines.length === 0 ? ["There are no unresolved code comments or conversation comments."] : lines;
+}
+
+export function addressThreadTitle(pull: Pick<PullDetail, "repo" | "number" | "title">): string {
+  return truncate(`Address comments ${pull.repo.slice(pull.repo.indexOf("/") + 1)}#${pull.number}: ${pull.title}`, 120);
+}
+
+export function addressPrompt(pull: PullDetail): string {
+  return [
+    `You are the comment-addressing thread for ${pull.repo}#${pull.number} "${pull.title}" by @${pull.author.login}: ${pull.url}`,
+    `Branch ${pull.headRefName} into ${pull.baseRefName}. PR Board shows your suggestions under each comment, and the user decides what to apply or post.`,
+    "",
+    ...commentList(pull),
+    "",
+    "Summarize in a short list what the reviewers ask for. Do not read or change files yet: the PR head is still being checked out in this worktree.",
+  ].join("\n");
+}
+
+export function addressMessage(pull: PullDetail, withList: boolean): string {
+  return [
+    withList
+      ? "Here are the PR's current comments. Suggest again how to address them; your new suggestions replace the earlier ones."
+      : "The PR head is now checked out in this worktree. Suggest how to address the comments listed above.",
+    `The PR head is ${pull.headSha}. If \`git rev-parse HEAD\` differs, run \`git pull --ff-only\` first; if that fails, say so and stop.`,
+    ...(withList ? ["", ...commentList(pull), ""] : []),
+    "- Do not edit, create, or delete files, and do not commit or push. PR Board applies a change only when the user accepts it. The worktree may already hold changes the user accepted from earlier suggestions, so read the current files.",
+    "- For each comment by someone other than you that still needs a response, propose a code change, a reply, or both. Skip comments that need nothing, such as bot status reports or questions already answered.",
+    "- A change is a list of edits. Each edit has a repository-relative `path`, `find` (text copied exactly from the current file that appears there exactly once; include a few surrounding lines), and `replace` (the new text). Use an empty `find` to create a new file. Edits in one change apply in order, so a later `find` must match the file after the earlier edits; do not overlap them.",
+    `- A reply is what @${pull.viewer} could post: short and specific. With a change, the reply can say what changed. A reply to a conversation comment is posted as a new PR comment, so start it with an @mention of the commenter.`,
+    `- When done, call the ${SUGGESTIONS_TOOL} tool once with every suggestion, using the comment ids in brackets. If it reports errors, nothing was recorded: fix those suggestions and call it again with every suggestion, including the ones without errors.`,
+  ].join("\n");
+}
+
+export function submitAddressMessage(pull: PullDetail, changedFiles: readonly string[]): string {
+  return [
+    `The user clicked Submit Address. Check, commit, and push the changes they accepted, to the PR's head branch \`${pull.headRefName}\` of ${pull.repo}#${pull.number}.`,
+    "Do not edit, create, or delete any files yourself, and never force-push. The worktree must hold exactly what the user accepted.",
+    "",
+    `Changed files: ${changedFiles.join(", ")}`,
+    "",
+    "1. Run `git status` and `git diff` to see the accepted changes.",
+    "2. Make sure they will pass the PR's GitHub Actions: read the workflows in `.github/workflows/` that run on pull requests, and run their check, lint, typecheck, build, and test steps locally in this worktree. Skip steps that deploy or need secrets or services you do not have, and list what you skipped.",
+    "3. If any check fails, stop: do not change files, commit, or push. Report each failure with its output.",
+    "4. If every check passes, commit all the changes with a message that names the comments they address.",
+    `5. Fetch the PR branch and merge it into this branch if it has new commits. If the merge conflicts, run \`git merge --abort\` and stop without pushing. If the merge brought new commits, run the checks again and stop on a failure.`,
+    `6. Push to \`${pull.headRefName}\` on the remote \`gh pr checkout\` set as this branch's upstream (\`git rev-parse --abbrev-ref @{upstream}\`), for example \`git push <remote> HEAD:${pull.headRefName}\`. Do not push anywhere else and do not merge the pull request.`,
+    `7. Watch the PR's checks with \`gh pr checks ${pull.number} -R ${pull.repo} --watch\` and report the commit sha, what you ran and skipped, and the result of each check.`,
+  ].join("\n");
+}

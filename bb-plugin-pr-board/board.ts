@@ -8,6 +8,13 @@ export interface Actor {
 
 export type GitHubReviewState = "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED" | "PENDING";
 
+export interface ConversationEntry {
+  author: Actor;
+  at: string;
+  hasBody: boolean;
+  reviewState: GitHubReviewState | null;
+}
+
 export interface PullSnapshot {
   repo: string;
   number: number;
@@ -28,8 +35,10 @@ export interface PullSnapshot {
   latestReviews: Array<{ author: Actor; state: GitHubReviewState }>;
   reviews: Array<{ author: Actor; state: GitHubReviewState }>;
   commentAuthors: Actor[];
+  conversation: ConversationEntry[];
   unresolvedThreads: number;
   unresolvedThreadLastAuthors: Actor[];
+  unresolvedThreadAuthors: Actor[][];
 }
 
 export function isAutomated(actor: Actor): boolean {
@@ -76,6 +85,27 @@ const REVIEWER_STATES: Partial<Record<GitHubReviewState, ReviewerState>> = {
 export function isAwaitingReplyFrom(pull: PullSnapshot, login: string): boolean {
   if (pull.unresolvedThreadLastAuthors.some((actor) => actor.login === login)) return true;
   return pull.commentAuthors.filter((actor) => !isAutomated(actor)).at(-1)?.login === login;
+}
+
+function asksForReply(entry: ConversationEntry): boolean {
+  return entry.hasBody && (entry.reviewState === null || entry.reviewState === "COMMENTED" || entry.reviewState === "CHANGES_REQUESTED");
+}
+
+function isReplyFrom(entry: ConversationEntry, login: string): boolean {
+  return entry.author.login === login && (entry.hasBody || entry.reviewState !== "COMMENTED");
+}
+
+export function unansweredCount(pull: PullSnapshot, login: string): number {
+  const isAuthor = pull.author?.login === login;
+  const threads = pull.unresolvedThreadAuthors.filter((authors) => {
+    const people = authors.filter((actor) => !isAutomated(actor));
+    const last = people.at(-1);
+    return last !== undefined && last.login !== login && (isAuthor || people.some((actor) => actor.login === login));
+  }).length;
+  const conversation = pull.conversation.filter((entry) => !isAutomated(entry.author));
+  const lastReply = conversation.reduce((last, entry, index) => (isReplyFrom(entry, login) ? index : last), -1);
+  if (lastReply === -1 && !isAuthor) return threads;
+  return threads + conversation.slice(lastReply + 1).filter((entry) => entry.author.login !== login && asksForReply(entry)).length;
 }
 
 export function reviewersOf(pull: PullSnapshot): Array<Person & { state: ReviewerState }> {

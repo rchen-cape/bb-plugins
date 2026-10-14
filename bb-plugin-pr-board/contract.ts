@@ -52,6 +52,7 @@ export const boardCardSchema = z.object({
   reviewers: z.array(personSchema.extend({ state: reviewerStateSchema })),
   humanComments: z.number().int().nonnegative(),
   unresolvedThreads: z.number().int().nonnegative(),
+  unansweredComments: z.number().int().nonnegative(),
   isAuthor: z.boolean(),
   isMentioned: z.boolean(),
   isRequested: z.boolean(),
@@ -87,11 +88,23 @@ const commentSchema = z.object({
   id: z.string(),
   databaseId: z.number().int(),
   author: personSchema,
+  isBot: z.boolean(),
   body: z.string(),
   createdAt: z.string(),
   url: z.string(),
 });
 export type ReviewComment = z.infer<typeof commentSchema>;
+
+const conversationCommentSchema = z.object({
+  id: z.string(),
+  kind: z.enum(["comment", "review"]),
+  author: personSchema,
+  isBot: z.boolean(),
+  body: z.string(),
+  createdAt: z.string(),
+  url: z.string(),
+});
+export type ConversationComment = z.infer<typeof conversationCommentSchema>;
 
 export const reviewThreadSchema = z.object({
   id: z.string(),
@@ -125,6 +138,7 @@ const pullDetailSchema = z.object({
   viewer: z.string(),
   files: z.array(pullFileSchema),
   threads: z.array(reviewThreadSchema),
+  conversation: z.array(conversationCommentSchema),
 });
 export type PullDetail = z.infer<typeof pullDetailSchema>;
 
@@ -155,10 +169,38 @@ const draftSchema = z.object({
 });
 export type Draft = z.infer<typeof draftSchema>;
 
+export const suggestionEditSchema = z.object({
+  path: z.string(),
+  find: z.string(),
+  replace: z.string(),
+});
+export type SuggestionEdit = z.infer<typeof suggestionEditSchema>;
+
+export const replyStateSchema = z.enum(["open", "used", "dismissed"]);
+export const changeStateSchema = z.enum(["open", "applied", "dismissed"]);
+
+const suggestionSchema = z.object({
+  id: z.string(),
+  commentId: z.string(),
+  summary: z.string(),
+  reply: z.string().nullable(),
+  replyState: replyStateSchema,
+  edits: z.array(suggestionEditSchema),
+  changeState: changeStateSchema,
+});
+export type Suggestion = z.infer<typeof suggestionSchema>;
+
+const addressAgentSchema = z.object({
+  threadId: z.string().nullable(),
+  running: z.boolean(),
+});
+
 const reviewStateSchema = z.object({
   agent: agentSchema,
   findings: z.array(findingSchema),
   drafts: z.array(draftSchema),
+  addressAgent: addressAgentSchema,
+  suggestions: z.array(suggestionSchema),
 });
 export type ReviewState = z.infer<typeof reviewStateSchema>;
 
@@ -272,12 +314,39 @@ export const rpcContract = defineRpcContract({
     input: z.object({ ...pullRef, pullNodeId: z.string().min(1), path: pathSchema, viewed: z.boolean() }).strict(),
     output: empty,
   },
-  askAgent: {
-    input: z.object({ ...pullRef, ...commentTargetSchema, question: bodySchema }).strict(),
-    output: z.object({ threadId: z.string(), delivery: z.enum(["sent", "queued"]) }),
-  },
   dismissFinding: {
     input: z.object({ id: z.string().min(1), dismissed: z.boolean() }).strict(),
+    output: empty,
+  },
+  addressComments: {
+    input: z.object(pullRef).strict(),
+    output: z.object({ threadId: z.string(), created: z.boolean(), delivery: z.enum(["sent", "queued"]) }),
+  },
+  suggestionFiles: {
+    input: z.object({ id: z.string().min(1) }).strict(),
+    output: z.object({
+      files: z.array(z.object({ path: z.string(), before: z.string().nullable(), after: z.string() })),
+      error: z.string().nullable(),
+    }),
+  },
+  applySuggestion: {
+    input: z.object({ id: z.string().min(1) }).strict(),
+    output: empty,
+  },
+  setSuggestionState: {
+    input: z
+      .discriminatedUnion("part", [
+        z.object({ id: z.string().min(1), part: z.literal("reply"), state: replyStateSchema }).strict(),
+        z.object({ id: z.string().min(1), part: z.literal("change"), state: z.enum(["open", "dismissed"]) }).strict(),
+      ]),
+    output: empty,
+  },
+  submitAddress: {
+    input: z.object(pullRef).strict(),
+    output: z.object({ threadId: z.string(), delivery: z.enum(["sent", "queued"]) }),
+  },
+  postConversationComment: {
+    input: z.object({ ...pullRef, body: bodySchema }).strict(),
     output: empty,
   },
 });
