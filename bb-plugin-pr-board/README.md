@@ -34,7 +34,8 @@ board to those repositories. The PRs are grouped in four columns:
 | Reviewing | Commented on or reviewed by someone other than the author. Comments from bots, GitHub Actions, and Copilot do not count. |
 | Ready | Approved: GitHub's review decision is approved, or, in repositories without required reviews, a person approved and nobody requested changes. |
 
-Each card shows the number, title, author, age, size, CI status, reviewers
+Each card shows the repository name (unless the board is limited to one
+repository), number, title, author, age, size, CI status, reviewers
 (ring color: green approved, red changes requested, blue commented, grey
 requested), comment count, unresolved threads, and the review thread's state.
 Filter by text, or by **Mine**, **Requested**, **Mentioned**, and **Awaiting reply**.
@@ -147,7 +148,7 @@ were.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| Repositories | `private-tech-inc/hss` | Comma-separated `owner/repo` list for the board. |
+| Repositories | empty | Optional comma-separated `owner/repo` list that limits the board. |
 | Review project | none | Project that review threads start in when no project's remote matches. |
 | Review model | `claude-opus-5-5` | Claude Code model of new review threads. Empty uses the project's default. |
 | Review reasoning effort | `high` | `low`, `medium`, `high`, `xhigh`, or `max`. |

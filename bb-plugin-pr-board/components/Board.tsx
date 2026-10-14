@@ -502,7 +502,7 @@ export function BoardView() {
             collapsed={collapsedSections.has(section.id)}
             onToggle={() => collapsedSections.toggle(section.id)}
           >
-            <CardList cards={section.cards} layout={layout} showRepo={repos.length > 1} compact={compact} hidden={hidden} onOpen={open} />
+            <CardList cards={section.cards} layout={layout} showRepo={repos.length !== 1} compact={compact} hidden={hidden} onOpen={open} />
           </Section>
         ))}
       </div>
