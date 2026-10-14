@@ -52,6 +52,7 @@ function detail(overrides: Partial<PullDetail> = {}): PullDetail {
       { id: "IC_alice", kind: "comment", author: person("alice"), isBot: false, body: "Add tests", createdAt: "2026-10-02T00:00:00Z", url: "u" },
       { id: "IC_me", kind: "comment", author: person("me"), isBot: false, body: "Will do", createdAt: "2026-10-03T00:00:00Z", url: "u" },
     ],
+    awaitingReply: [],
     ...overrides,
   };
 }
@@ -140,17 +141,41 @@ describe("worktree files", () => {
 });
 
 describe("address prompts", () => {
-  it("lists unresolved code comments and the conversation with ids, and only accepts others' comments", () => {
-    const pull = detail();
+  it("lists only comments where someone else spoke last", () => {
+    const base = detail();
+    const mine = {
+      id: "PRRT_mine",
+      path: "c.go",
+      side: "additions" as const,
+      line: 3,
+      startLine: null,
+      isResolved: false,
+      isOutdated: false,
+      comments: [
+        { id: "c3", databaseId: 3, author: { login: "bob", avatarUrl: null }, isBot: false, body: "Why?", createdAt: "2026-10-01T00:00:00Z", url: "u" },
+        { id: "c4", databaseId: 4, author: { login: "me", avatarUrl: null }, isBot: false, body: "Because", createdAt: "2026-10-02T00:00:00Z", url: "u" },
+      ],
+    };
+    const pull = detail({ threads: [...base.threads, mine] });
     const prompt = addressPrompt(pull);
     expect(prompt).toContain("[PRRT_open] a.go lines 2-4");
     expect(prompt).toContain("@alice: Rename this");
     expect(prompt).not.toContain("PRRT_done");
-    expect(prompt).toContain("[IC_me] @me (you): Will do");
+    expect(prompt).not.toContain("PRRT_mine");
+    expect(prompt).not.toContain("IC_alice");
+    expect(prompt).not.toContain("IC_me");
     expect(prompt).toContain("Do not read or change files yet");
     expect(addressMessage(pull, false)).toContain(SUGGESTIONS_TOOL);
     expect(addressMessage(pull, false)).not.toContain("[PRRT_open]");
     expect(addressMessage(pull, true)).toContain("[PRRT_open]");
-    expect([...addressableIds(pull)]).toEqual(["PRRT_open", "IC_alice"]);
+    expect([...addressableIds(pull)]).toEqual(["PRRT_open"]);
+
+    const waiting = detail({ awaitingReply: ["IC_alice"] });
+    expect(addressPrompt(waiting)).toContain("[IC_alice] @alice: Add tests");
+    expect([...addressableIds(waiting)]).toEqual(["PRRT_open", "IC_alice"]);
+
+    const answered = detail({ threads: [mine], awaitingReply: [] });
+    expect(addressPrompt(answered)).toContain("No comments are waiting for a reply from you.");
+    expect(addressableIds(answered).size).toBe(0);
   });
 });

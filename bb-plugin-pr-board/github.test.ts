@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseBoardPulls, parseFilePages, pullConversation, reviewCommentFields } from "./github";
+import { parseBoardPulls, parseFilePages, pullAwaitingReply, pullConversation, reviewCommentFields } from "./github";
 
 const NODE = {
   repository: { nameWithOwner: "acme/app" },
@@ -108,6 +108,42 @@ describe("reviewCommentFields", () => {
       start_line: 2,
       start_side: "LEFT",
     });
+  });
+});
+
+describe("pullAwaitingReply", () => {
+  it("returns others' comments and reviews with text after my last conversation reply, not counting my code-comment replies", () => {
+    const reviewer = { __typename: "User", login: "sbarai-cape" };
+    const me = { __typename: "User", login: "rchen-cape" };
+    const review = (id: string, author: typeof me, submittedAt: string, body = "", state: "COMMENTED" | "APPROVED" = "COMMENTED") => ({
+      id,
+      state,
+      body,
+      submittedAt,
+      url: "r",
+      author,
+    });
+    const awaiting = pullAwaitingReply(
+      {
+        comments: {
+          nodes: [
+            { id: "IC_old", body: "Early question", createdAt: "2026-10-01T00:00:00Z", url: "c", author: reviewer },
+            { id: "IC_answer", body: "Answered", createdAt: "2026-10-02T00:00:00Z", url: "c", author: me },
+            { id: "IC_bot", body: "Deployed", createdAt: "2026-10-14T00:00:00Z", url: "c", author: { __typename: "Bot", login: "vercel" } },
+          ],
+        },
+        reviews: {
+          nodes: [
+            review("PRR_inline", me, "2026-10-07T18:28:02Z"),
+            review("PRR_summary", reviewer, "2026-10-12T19:16:29Z", "Overall, looks good to me, left a few minor comments."),
+            review("PRR_reply", reviewer, "2026-10-13T21:47:57Z"),
+            review("PRR_lgtm", reviewer, "2026-10-13T22:00:00Z", "LGTM", "APPROVED"),
+          ],
+        },
+      },
+      "rchen-cape",
+    );
+    expect(awaiting).toEqual(["PRR_summary"]);
   });
 });
 

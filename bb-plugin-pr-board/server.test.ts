@@ -107,7 +107,7 @@ function searchResponse(q: string) {
   return { data: { search: { nodes } } };
 }
 
-function fakeRunner() {
+function fakeRunner(pullResponse: unknown = PULL_RESPONSE) {
   const calls: Array<{ command: string; args: readonly string[]; options: RunOptions }> = [];
   const run = vi.fn(async (command: string, args: readonly string[], options: RunOptions) => {
     calls.push({ command, args, options });
@@ -119,7 +119,7 @@ function fakeRunner() {
     if (args[0] === "api" && args[1] === "graphql") {
       const { query, variables } = JSON.parse(options.input ?? "{}") as { query: string; variables: { q?: string } };
       if (variables.q !== undefined) return JSON.stringify(searchResponse(variables.q));
-      return JSON.stringify(query.includes("viewerViewedState") ? VIEWED_RESPONSE : PULL_RESPONSE);
+      return JSON.stringify(query.includes("viewerViewedState") ? VIEWED_RESPONSE : pullResponse);
     }
     if (args.includes("--paginate")) {
       return JSON.stringify([[{ filename: "a.go", status: "modified", additions: 10, deletions: 2, patch: "@@ -1,2 +1,3 @@\n a\n+b\n c" }]]);
@@ -177,6 +177,7 @@ describe("prompts", () => {
       files: [{ path: "a.go", previousPath: null, status: "modified", additions: 1, deletions: 0, patch: null, viewed: false }],
       threads: [],
       conversation: [],
+      awaitingReply: [],
     });
     expect(prompt).toContain("Summarize this PR very simply");
     expect(prompt).toContain("gh pr diff 7 -R acme/app");
@@ -351,8 +352,8 @@ describe("address comments", () => {
     await rm(worktree, { recursive: true, force: true });
   });
 
-  function addressSetup({ gitStatus = "", heads = [HEAD], pullError }: { gitStatus?: string; heads?: string[]; pullError?: string } = {}) {
-    const runner = fakeRunner();
+  function addressSetup({ gitStatus = "", heads = [HEAD], pullError, pull }: { gitStatus?: string; heads?: string[]; pullError?: string; pull?: unknown } = {}) {
+    const runner = fakeRunner(pull);
     const git: string[][] = [];
     const remaining = [...heads];
     const run = vi.fn(async (command: string, args: readonly string[], options: RunOptions) => {
@@ -409,6 +410,45 @@ describe("address comments", () => {
       makePluginAgentConfigurationContext({ pluginMetadata: { repo: "acme/app", number: 7, kind: "address" } }),
     );
     expect(address.tools.map((tool) => tool.name)).toEqual([SUGGESTIONS_TOOL]);
+  });
+
+  it("starts no thread when every comment's last reply is mine", async () => {
+    const pullRequest = PULL_RESPONSE.data.repository.pullRequest;
+    const [thread] = pullRequest.reviewThreads.nodes;
+    const answered = {
+      data: {
+        ...PULL_RESPONSE.data,
+        repository: {
+          pullRequest: {
+            ...pullRequest,
+            reviewThreads: {
+              nodes: [
+                {
+                  ...thread!,
+                  comments: {
+                    nodes: [
+                      ...thread!.comments.nodes,
+                      { id: "c2", databaseId: 12, body: "Done", createdAt: "2026-10-03T00:00:00Z", url: "u", author: { login: "me" } },
+                    ],
+                  },
+                },
+              ],
+            },
+            comments: {
+              nodes: [
+                ...pullRequest.comments.nodes,
+                { id: "IC_2", body: "Added", createdAt: "2026-10-03T00:00:00Z", url: "u", author: { login: "me" } },
+              ],
+            },
+          },
+        },
+      },
+    };
+    const { harness } = addressSetup({ pull: answered });
+    await expect(harness.behavior.callRpc("addressComments", { repo: "acme/app", number: 7 })).rejects.toThrow(
+      "No comments are waiting for your reply",
+    );
+    expect(harness.inspection.sdk.callsTo("threads.spawn")).toHaveLength(0);
   });
 
   it("moves the address worktree to the PR's new commits before sending the comments again", async () => {
@@ -525,6 +565,9 @@ describe("address comments", () => {
     expect(message).toContain("edits that keep the code's behavior the same");
     expect(message).toContain("Do not change logic, tests, or test expectations");
     expect(message).toContain("commit them separately");
+    expect(message).toContain("`git commit -S` and `git merge -S`");
+    expect(message).toContain("never pass `--no-gpg-sign`");
+    expect(message).toContain("%G?");
   });
 
   it("posts a conversation comment through gh", async () => {

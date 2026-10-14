@@ -539,6 +539,7 @@ export function createPlugin(deps: PluginDeps) {
       const detail = await pullDetail(pull, true);
       const existing = await addressThreadFor(pull);
       if (existing !== null && preparing.has(existing.id)) return { threadId: existing.id, created: false, delivery: "queued" };
+      if (addressableIds(detail).size === 0) throw new Error("No comments are waiting for your reply, so there is nothing to address.");
       if (existing !== null) {
         await updateAddressWorktree(existing.id, detail);
         return { threadId: existing.id, created: false, delivery: await sendAddress(existing.id, detail, true) };

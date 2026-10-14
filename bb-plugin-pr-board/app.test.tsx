@@ -101,6 +101,7 @@ const DETAIL: PullDetail = {
   ],
   threads: [],
   conversation: [],
+  awaitingReply: [],
 };
 
 const STATE: ReviewState = {
@@ -442,6 +443,7 @@ describe("comments", () => {
     const dialog = await slot.findByRole("dialog");
     expect(dialog.textContent).toContain("it may fix it with edits that don't change behavior");
     expect(dialog.textContent).toContain("If a check still fails or needs a logic change, it stops without committing or pushing.");
+    expect(dialog.textContent).toContain("Every commit is signed with your git signing key");
     expect(slot.inspection.rpcCalls.some((call) => call.method === "submitAddress")).toBe(false);
     fireEvent.click(within(dialog).getByRole("button", { name: "Submit Address" }));
     await waitFor(() =>

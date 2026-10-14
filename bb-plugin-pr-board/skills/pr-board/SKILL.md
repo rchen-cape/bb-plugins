@@ -40,7 +40,8 @@ bb pr-board suggestions <n | owner/repo#n | PR URL> [--json]
 - `submit-address` asks the PR's address thread to run the PR's GitHub Actions
   checks on its accepted changes, fix failures only with edits that do not
   change behavior (formatting, lint, imports, type annotations, generated
-  files), and, if the checks pass, commit and push them to the PR branch. It prints `sent` or `queued` with the thread id. It pushes code, so
+  files), and, if the checks pass, commit them signed and push them to the PR
+  branch. It prints `sent` or `queued` with the thread id. It pushes code, so
   only run it when the user asks.
 - `suggestions` prints `commentId  change:open|applied|dismissed  reply:open|used|dismissed  summary`,
   with `-` for a missing change or reply.

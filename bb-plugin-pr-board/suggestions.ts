@@ -98,18 +98,19 @@ export async function writePreviews(root: string, files: readonly FilePreview[])
 }
 
 export function commentsToAddress(detail: PullDetail): { threads: ReviewThread[]; conversation: ConversationComment[] } {
+  const awaiting = new Set(detail.awaitingReply);
   return {
-    threads: detail.threads.filter((thread) => !thread.isResolved && thread.comments.length > 0),
-    conversation: detail.conversation,
+    threads: detail.threads.filter((thread) => {
+      const last = thread.comments.at(-1);
+      return !thread.isResolved && last !== undefined && last.author.login !== detail.viewer;
+    }),
+    conversation: detail.conversation.filter((comment) => awaiting.has(comment.id)),
   };
 }
 
 export function addressableIds(detail: PullDetail): Set<string> {
   const { threads, conversation } = commentsToAddress(detail);
-  return new Set([
-    ...threads.map((thread) => thread.id),
-    ...conversation.filter((comment) => comment.author.login !== detail.viewer).map((comment) => comment.id),
-  ]);
+  return new Set([...threads.map((thread) => thread.id), ...conversation.map((comment) => comment.id)]);
 }
 
 function commentList(detail: PullDetail): string[] {
@@ -118,7 +119,7 @@ function commentList(detail: PullDetail): string[] {
   const body = (text: string) => truncate(text.trim(), COMMENT_LIMIT).replaceAll("\n", "\n    ");
   const lines: string[] = [];
   if (threads.length > 0) {
-    lines.push("Unresolved code comments:");
+    lines.push("Unresolved code comments where someone else replied last:");
     for (const thread of threads) {
       const range = thread.line === null ? "" : thread.startLine !== null && thread.startLine !== thread.line ? ` lines ${thread.startLine}-${thread.line}` : ` line ${thread.line}`;
       lines.push(`[${thread.id}] ${thread.path}${range}${thread.side === "deletions" ? " (old side)" : ""}${thread.isOutdated ? " (outdated)" : ""}`);
@@ -127,12 +128,12 @@ function commentList(detail: PullDetail): string[] {
   }
   if (conversation.length > 0) {
     if (lines.length > 0) lines.push("");
-    lines.push("Conversation, oldest first:");
+    lines.push("Conversation comments posted after your last reply, oldest first:");
     for (const comment of conversation) {
       lines.push(`[${comment.id}] ${who(comment.author.login)}${comment.kind === "review" ? " (review)" : ""}: ${body(comment.body)}`);
     }
   }
-  return lines.length === 0 ? ["There are no unresolved code comments or conversation comments."] : lines;
+  return lines.length === 0 ? ["No comments are waiting for a reply from you."] : lines;
 }
 
 export function addressThreadTitle(pull: Pick<PullDetail, "repo" | "number" | "title">): string {
@@ -158,7 +159,7 @@ export function addressMessage(pull: PullDetail, withList: boolean): string {
     `The PR head is ${pull.headSha}. If \`git rev-parse HEAD\` differs, run \`git pull --ff-only\` first; if that fails, say so and stop.`,
     ...(withList ? ["", ...commentList(pull), ""] : []),
     "- Do not edit, create, or delete files, and do not commit or push. PR Board applies a change only when the user accepts it. The worktree may already hold changes the user accepted from earlier suggestions, so read the current files.",
-    "- For each comment by someone other than you that still needs a response, propose a code change, a reply, or both. Skip comments that need nothing, such as bot status reports or questions already answered.",
+    "- Every listed comment is waiting for your reply: someone else spoke last. Address only these; comments where you replied last are left out on purpose. For each one, propose a code change, a reply, or both. Skip ones that need nothing, such as bot status reports.",
     "- A change is a list of edits. Each edit has a repository-relative `path`, `find` (text copied exactly from the current file that appears there exactly once; include a few surrounding lines), and `replace` (the new text). Use an empty `find` to create a new file. Edits in one change apply in order, so a later `find` must match the file after the earlier edits; do not overlap them.",
     `- A reply is what @${pull.viewer} could post: short and specific. With a change, the reply can say what changed. A reply to a conversation comment is posted as a new PR comment, so start it with an @mention of the commenter.`,
     `- When done, call the ${SUGGESTIONS_TOOL} tool once with every suggestion, using the comment ids in brackets. If it reports errors, nothing was recorded: fix those suggestions and call it again with every suggestion, including the ones without errors.`,
@@ -169,15 +170,17 @@ export function submitAddressMessage(pull: PullDetail, changedFiles: readonly st
   return [
     `The user clicked Submit Address. Check, commit, and push the changes they accepted, to the PR's head branch \`${pull.headRefName}\` of ${pull.repo}#${pull.number}.`,
     "Never force-push. The only edits you may make are ones that do not change what the code does, to get the checks to pass (step 3).",
+    "Every commit you make, merge commits included, must be signed with the user's git signing key: use `git commit -S` and `git merge -S`, and never pass `--no-gpg-sign`, set `commit.gpgsign=false`, or change the signing config. If signing fails only because the sandbox blocks `~/.gnupg` or the gpg agent, retry the same signed command outside the sandbox. If it still fails, stop without pushing and report the error.",
     "",
     `Changed files: ${changedFiles.join(", ")}`,
     "",
     "1. Run `git status` and `git diff` to see the accepted changes.",
     "2. Make sure they will pass the PR's GitHub Actions: read the workflows in `.github/workflows/` that run on pull requests, and run their check, lint, typecheck, build, and test steps locally in this worktree. Skip steps that deploy or need secrets or services you do not have, and list what you skipped.",
     "3. If a check fails, you may fix it only with edits that keep the code's behavior the same: formatter output, lint auto-fixes and style fixes, import order, unused imports, type annotations, comments, and regenerating generated files or lockfiles the checks expect. Run the checks again after fixing. Do not change logic, tests, or test expectations, and do not disable rules, skip checks, or add ignore comments. If a check still fails, or passing it needs a logic change, stop: undo your own fixes (keep the accepted changes), do not commit or push, and report each failure with its output.",
-    "4. If every check passes, commit the accepted changes with a message that names the comments they address. If you made fixes in step 3, commit them separately afterwards with a message that lists each one.",
-    `5. Fetch the PR branch and merge it into this branch if it has new commits. If the merge conflicts, run \`git merge --abort\` and stop without pushing. If the merge brought new commits, run the checks again and stop on a failure.`,
-    `6. Push to \`${pull.headRefName}\` on the remote \`gh pr checkout\` set as this branch's upstream (\`git rev-parse --abbrev-ref @{upstream}\`), for example \`git push <remote> HEAD:${pull.headRefName}\`. Do not push anywhere else and do not merge the pull request.`,
-    `7. Watch the PR's checks with \`gh pr checks ${pull.number} -R ${pull.repo} --watch\` and report the commit shas, what you ran and skipped, every fix you made in step 3 and why, and the result of each check.`,
+    "4. If every check passes, commit the accepted changes, signed, with a message that names the comments they address. If you made fixes in step 3, commit them separately afterwards, signed, with a message that lists each one.",
+    `5. Fetch the PR branch and merge it into this branch, signed, if it has new commits. If the merge conflicts, run \`git merge --abort\` and stop without pushing. If the merge brought new commits, run the checks again and stop on a failure.`,
+    "6. Before pushing, run `git log --format='%h %G? %s' @{upstream}..HEAD` and check that every commit you made shows a signature (`G` or `U`, not `N`). If one is unsigned, stop without pushing and report it.",
+    `7. Push to \`${pull.headRefName}\` on the remote \`gh pr checkout\` set as this branch's upstream (\`git rev-parse --abbrev-ref @{upstream}\`), for example \`git push <remote> HEAD:${pull.headRefName}\`. Do not push anywhere else and do not merge the pull request.`,
+    `8. Watch the PR's checks with \`gh pr checks ${pull.number} -R ${pull.repo} --watch\` and report the commit shas, what you ran and skipped, every fix you made in step 3 and why, and the result of each check.`,
   ].join("\n");
 }

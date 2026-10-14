@@ -102,10 +102,15 @@ export function unansweredCount(pull: PullSnapshot, login: string): number {
     const last = people.at(-1);
     return last !== undefined && last.login !== login && (isAuthor || people.some((actor) => actor.login === login));
   }).length;
-  const conversation = pull.conversation.filter((entry) => !isAutomated(entry.author));
+  const replied = pull.conversation.some((entry) => !isAutomated(entry.author) && isReplyFrom(entry, login));
+  if (!replied && !isAuthor) return threads;
+  return threads + awaitingReplyFrom(pull.conversation, login).length;
+}
+
+export function awaitingReplyFrom<T extends ConversationEntry>(entries: readonly T[], login: string): T[] {
+  const conversation = entries.filter((entry) => !isAutomated(entry.author));
   const lastReply = conversation.reduce((last, entry, index) => (isReplyFrom(entry, login) ? index : last), -1);
-  if (lastReply === -1 && !isAuthor) return threads;
-  return threads + conversation.slice(lastReply + 1).filter((entry) => entry.author.login !== login && asksForReply(entry)).length;
+  return conversation.slice(lastReply + 1).filter((entry) => entry.author.login !== login && asksForReply(entry));
 }
 
 export function reviewersOf(pull: PullSnapshot): Array<Person & { state: ReviewerState }> {

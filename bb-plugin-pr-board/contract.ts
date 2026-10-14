@@ -139,6 +139,7 @@ const pullDetailSchema = z.object({
   files: z.array(pullFileSchema),
   threads: z.array(reviewThreadSchema),
   conversation: z.array(conversationCommentSchema),
+  awaitingReply: z.array(z.string()),
 });
 export type PullDetail = z.infer<typeof pullDetailSchema>;
 

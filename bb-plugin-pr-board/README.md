@@ -117,9 +117,12 @@ The page has:
 
 **Address comments** starts a separate address thread for the PR, in its own
 `git-worktree` environment on the PR's head (checked out with `gh pr checkout`
-like the review thread). It lists the unresolved code comments and the
-conversation, asks for a short summary, and then, once the checkout is done,
-asks for a suggestion per comment that still needs a response. Clicking it
+like the review thread). It lists only the comments waiting for your reply, by
+the same rule as the board's red count: unresolved code comments where someone
+else replied last, and conversation comments or reviews with text from others
+posted after your last conversation reply (bots skipped). It asks for a short
+summary, and then, once the checkout is done, a suggestion per listed comment.
+When no comment is waiting for your reply, it says so and starts nothing. Clicking it
 again reloads the PR, moves the thread's worktree to the PR's latest commit
 with `git pull --ff-only` (keeping accepted changes), and sends the current
 comments to the same thread; its new suggestions replace the old ones. If the
@@ -152,7 +155,9 @@ It never changes logic, tests, or test expectations, and never disables rules
 or skips checks. If a check still fails, or needs a logic change, it undoes its
 own fixes and stops without committing or pushing. If they pass, it commits
 the accepted changes, commits its fixes separately and lists them, merges new
-commits from the PR branch (aborting on a conflict), pushes to the
+commits from the PR branch (aborting on a conflict), and checks that every
+commit it made is signed with your git signing key (`git commit -S`, never
+`--no-gpg-sign`; it stops before pushing if one is not). Then it pushes to the
 PR's head branch without force, and watches `gh pr checks`. It never merges the
 pull request. The button needs an address thread, and the server refuses when
 that thread's worktree has no changes.

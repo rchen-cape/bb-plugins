@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { z } from "zod";
-import { isAutomated, type Actor, type ConversationEntry, type PullSnapshot } from "./board.js";
+import { awaitingReplyFrom, isAutomated, type Actor, type ConversationEntry, type PullSnapshot } from "./board.js";
 import type { Checks, ConversationComment, FileContent, PullDetail, PullFile, ReviewEvent, ReviewThread, Side } from "./contract.js";
 
 export interface RunOptions {
@@ -337,6 +337,20 @@ export function pullConversation({ comments, reviews }: Pick<PullNode, "comments
   ].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
+export function pullAwaitingReply({ comments, reviews }: Pick<PullNode, "comments" | "reviews">, viewer: string): string[] {
+  const entries: Array<ConversationEntry & { id: string }> = [
+    ...comments.nodes.flatMap((comment) =>
+      comment.author === null ? [] : [{ id: comment.id, author: toActor(comment.author), at: comment.createdAt, hasBody: true, reviewState: null }],
+    ),
+    ...reviews.nodes.flatMap((review) =>
+      review.author === null || review.submittedAt === null
+        ? []
+        : [{ id: review.id, author: toActor(review.author), at: review.submittedAt, hasBody: review.body.trim() !== "", reviewState: review.state }],
+    ),
+  ].sort((a, b) => a.at.localeCompare(b.at));
+  return awaitingReplyFrom(entries, viewer).map((entry) => entry.id);
+}
+
 const VIEWED_QUERY = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
@@ -489,6 +503,7 @@ export function createGitHub(gh: Gh) {
         files: parseFilePages(rawFiles).map((file) => ({ ...file, viewed: viewed.get(file.path) ?? false })),
         threads,
         conversation: pullConversation(pull),
+        awaitingReply: pullAwaitingReply(pull, viewer.login),
       };
     },
 
