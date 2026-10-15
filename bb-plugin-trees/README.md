@@ -17,6 +17,11 @@ bb plugin install . --yes
 
 That adds the Trees panel, the `bb tree` command, and the `trees` agent skill.
 
+Trees needs a bb built from the rchen-cape/bb fork. Its panel registers
+`experimental_headerBreadcrumb`, which only the fork's plugin SDK accepts; stock
+bb installs the plugin and runs `bb tree`, but refuses to load the panel with
+`navPanel: unknown field "experimental_headerBreadcrumb"`.
+
 Trees keeps the plugin id `trees` it had when bb bundled it, so its graph in
 `<data dir>/plugins/trees/data.db` carries over. A bb build that still bundles
 Trees refuses this install; on a build without it, bb drops the old bundled
@@ -29,11 +34,11 @@ you had changed it.
 npm run check
 ```
 
-`check` runs `typecheck`, `test`, and `build`. The panel's breadcrumb uses
-`experimental_headerBreadcrumb`, which only the rchen-cape/bb fork's plugin SDK
-has, so `@get-bb/plugin-sdk` comes from `vendor/get-bb-plugin-sdk-0.6.43.tgz`,
-packed from that fork, rather than from npm. Do not run `bb plugin types`, which
-repins it to the published SDK. To refresh the tarball from a fork checkout:
+`check` runs `typecheck`, `test`, and `build`. `@get-bb/plugin-sdk` comes from
+`vendor/`, a tarball packed from the rchen-cape/bb fork, because the published
+SDK lacks `experimental_headerBreadcrumb`. Do not run `bb plugin types`, which
+repins it to the published SDK. To refresh the tarball from a fork checkout,
+delete the old one from `vendor/`, then:
 
 ```sh
 cd packages/plugin-sdk
@@ -41,7 +46,16 @@ node scripts/build-bundled-dts.mjs && node scripts/build-runtime.mjs
 npm pack --ignore-scripts --pack-destination <this directory>/vendor
 ```
 
-Then run `npm install` here.
+Back in this directory, install the file `npm pack` printed, so `package.json`,
+`package-lock.json`, and `node_modules` all move to it:
+
+```sh
+npm install -D ./vendor/get-bb-plugin-sdk-<version>.tgz
+```
+
+Commit the tarball and `package-lock.json` together. A plain `npm install`
+reports "up to date" after a same-named tarball changes, keeps the old SDK, and
+leaves a lockfile checksum that fails the next clean install.
 
 ## Where the files live
 

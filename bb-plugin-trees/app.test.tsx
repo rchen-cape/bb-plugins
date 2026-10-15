@@ -1267,6 +1267,9 @@ describe("Trees panel", () => {
     const document = (await slot.findByLabelText(
       "Task document",
     )) as HTMLTextAreaElement;
+    await waitFor(() => {
+      expect(document.disabled).toBe(false);
+    });
     const file = new File(["png bytes"], "shot.png", { type: "image/png" });
     fireEvent.drop(document.parentElement!, {
       dataTransfer: { files: [file], items: [{ kind: "file" }] },
