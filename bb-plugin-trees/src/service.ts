@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { PERSONAL_PROJECT_ID, type PromptInput } from "@bb/domain";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
@@ -75,6 +74,12 @@ import {
   imageMimeType,
   withImageMarkers,
 } from "./images.js";
+
+type PromptInput = Parameters<
+  BbPluginApi["sdk"]["threads"]["send"]
+>[0]["input"][number];
+
+const PERSONAL_PROJECT_ID = "proj_personal";
 
 export class TreeError extends Error {}
 

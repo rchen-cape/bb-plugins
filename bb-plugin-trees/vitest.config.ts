@@ -1,24 +1,18 @@
-import path from "node:path";
-import {
-  defineWorkspaceTestConfig,
-  sharedWorkerProjects,
-} from "../../vitest.shared.js";
+import { defineConfig } from "vitest/config";
 
-export default defineWorkspaceTestConfig({
+export default defineConfig({
   resolve: {
     alias: {
-      "@": path.resolve(import.meta.dirname, "."),
+      "@": import.meta.dirname,
     },
   },
   test: {
     silent: "passed-only",
+    name: "bb-plugin-trees",
+    include: ["**/*.test.{ts,tsx}"],
+    exclude: ["node_modules/**", "dist/**"],
     testTimeout: 20_000,
-    projects: sharedWorkerProjects({
-      pkgDir: import.meta.dirname,
-      name: "bb-plugin-trees",
-      include: ["**/*.test.{ts,tsx}"],
-      exclude: ["node_modules/**", "dist/**"],
-      aliases: { "@": "." },
-    }),
+    globalSetup: ["./vitest.global-tmpdir.ts"],
+    setupFiles: ["./vitest.setup.ts"],
   },
 });

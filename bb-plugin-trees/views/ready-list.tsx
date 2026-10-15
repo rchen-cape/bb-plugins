@@ -1,6 +1,6 @@
-import { Badge } from "@bb/shared-ui/badge";
-import { EmptyStatePanel } from "@bb/shared-ui/empty-state";
-import { Icon } from "@bb/shared-ui/icon";
+import { Badge } from "../components/ui/badge";
+import { EmptyStatePanel } from "../components/ui/empty-state";
+import { Icon } from "../components/ui/icon";
 import {
   NODE_STATE_LABELS,
   type TreeNode,

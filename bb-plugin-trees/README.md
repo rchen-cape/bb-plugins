@@ -11,10 +11,37 @@ a BB thread that starts with the context its parents produced.
 ## Install
 
 ```sh
-bb plugin install trees
+npm install --include=dev
+bb plugin install . --yes
 ```
 
 That adds the Trees panel, the `bb tree` command, and the `trees` agent skill.
+
+Trees keeps the plugin id `trees` it had when bb bundled it, so its graph in
+`<data dir>/plugins/trees/data.db` carries over. A bb build that still bundles
+Trees refuses this install; on a build without it, bb drops the old bundled
+install at startup along with its settings, so set **Trees folder** again if
+you had changed it.
+
+## Develop
+
+```sh
+npm run check
+```
+
+`check` runs `typecheck`, `test`, and `build`. The panel's breadcrumb uses
+`experimental_headerBreadcrumb`, which only the rchen-cape/bb fork's plugin SDK
+has, so `@get-bb/plugin-sdk` comes from `vendor/get-bb-plugin-sdk-0.6.43.tgz`,
+packed from that fork, rather than from npm. Do not run `bb plugin types`, which
+repins it to the published SDK. To refresh the tarball from a fork checkout:
+
+```sh
+cd packages/plugin-sdk
+node scripts/build-bundled-dts.mjs && node scripts/build-runtime.mjs
+npm pack --ignore-scripts --pack-destination <this directory>/vendor
+```
+
+Then run `npm install` here.
 
 ## Where the files live
 

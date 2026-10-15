@@ -1,10 +1,10 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { Markdown, ThreadChat } from "@get-bb/plugin-sdk/app";
-import { Button } from "@bb/shared-ui/button";
-import { Icon } from "@bb/shared-ui/icon";
-import { Input } from "@bb/shared-ui/input";
-import { Textarea } from "@bb/shared-ui/textarea";
-import { cn } from "@bb/shared-ui/lib/utils";
+import { Button } from "../components/ui/button";
+import { Icon } from "../components/ui/icon";
+import { Input } from "../components/ui/input";
+import { Textarea } from "../components/ui/textarea";
+import { cn } from "../lib/utils";
 import {
   CONTEXT_MODES,
   CONTEXT_MODE_HINTS,

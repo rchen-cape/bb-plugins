@@ -55,6 +55,20 @@ title.
 | `bb tree ack <task>`                                            | Keep a stale task's output and clear its warning.                                                                                                                                                            |
 | `bb tree layout <project>`                                      | Re-lay out the canvas positions.                                                                                                                                                                             |
 
+Task file paths in `--content-file` resolve on the invoking machine (the
+thread's machine inside an agent thread, otherwise the server's); pass
+`--machine <id-or-name>` to target another enrolled machine.
+
+## The Trees folder
+
+Trees has one setting, `rootDirectory` (default `~/Trees`): the folder holding
+one subdirectory per tree. Change it with
+`bb plugin config trees set rootDirectory <path>`. The value must be absolute or
+start with `~/`; a relative path is refused. It resolves on the primary machine,
+so `~` expands to the home directory of the account running the bb server.
+Changing it affects trees created afterwards; existing trees keep the folder
+recorded when they were created.
+
 ## Creating a plan as a tree
 
 ```sh

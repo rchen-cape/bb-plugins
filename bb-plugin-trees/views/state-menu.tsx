@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Icon } from "@bb/shared-ui/icon";
-import { cn } from "@bb/shared-ui/lib/utils";
+import { Icon } from "../components/ui/icon";
+import { cn } from "../lib/utils";
 import type { NodeState } from "../src/model";
 import { STATE_DOT_CLASS, STATE_TEXT_CLASS } from "./node-visuals";
 

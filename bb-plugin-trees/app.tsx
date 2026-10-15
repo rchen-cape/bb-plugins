@@ -7,10 +7,10 @@ import {
   type PluginNavPanelProps,
 } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
-import { Button } from "@bb/shared-ui/button";
-import { Icon } from "@bb/shared-ui/icon";
-import { Input } from "@bb/shared-ui/input";
-import { cn } from "@bb/shared-ui/lib/utils";
+import { Button } from "./components/ui/button";
+import { Icon } from "./components/ui/icon";
+import { Input } from "./components/ui/input";
+import { cn } from "./lib/utils";
 import {
   PanelResizer,
   panelWidthStyle,

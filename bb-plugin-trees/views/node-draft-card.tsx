@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Input } from "@bb/shared-ui/input";
-import { cn } from "@bb/shared-ui/lib/utils";
+import { Input } from "../components/ui/input";
+import { cn } from "../lib/utils";
 import { NODE_KINDS, type NodeKind } from "../src/model";
 import { KIND_CHIP_CLASS, KIND_LABELS } from "./node-visuals";
 

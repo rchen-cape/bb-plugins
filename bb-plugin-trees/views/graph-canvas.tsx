@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { Icon } from "@bb/shared-ui/icon";
-import { cn } from "@bb/shared-ui/lib/utils";
+import { Icon } from "../components/ui/icon";
+import { cn } from "../lib/utils";
 import { NODE_STATE_LABELS, type NodeKind, type TreeNode } from "../src/model";
 import { formatRelativeTime } from "../src/time";
 import { DRAFT_HEIGHT, NodeDraftCard, type NodeDraft } from "./node-draft-card";
