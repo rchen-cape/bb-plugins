@@ -794,6 +794,8 @@ describe("address comments", () => {
     expect(message).toContain("`git commit -S` and `git merge -S`");
     expect(message).toContain("never pass `--no-gpg-sign`");
     expect(message).toContain("%G?");
+    expect(message).toContain("Commits must be attributed to the user alone");
+    expect(message).toContain("do not add a `Co-Authored-By` trailer");
   });
 
   it("posts a conversation comment through gh", async () => {

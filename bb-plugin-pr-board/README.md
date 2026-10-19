@@ -239,7 +239,9 @@ own fixes and stops without committing or pushing. If they pass, it commits
 the accepted changes, commits its fixes separately and lists them, merges new
 commits from the PR branch (aborting on a conflict), and checks that every
 commit it made is signed with your git signing key (`git commit -S`, never
-`--no-gpg-sign`; it stops before pushing if one is not). Then it pushes to the
+`--no-gpg-sign`; it stops before pushing if one is not) and attributed to you
+alone, with no `Co-Authored-By: Claude` trailer or other AI attribution in the
+message (it rewords any unpushed commit that has one). Then it pushes to the
 PR's head branch without force, and watches `gh pr checks`. It never merges the
 pull request. The button needs an address thread, and the server refuses when
 that thread's worktree has no changes.

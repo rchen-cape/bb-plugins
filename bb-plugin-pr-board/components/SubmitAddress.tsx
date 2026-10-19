@@ -47,7 +47,8 @@ export function SubmitAddressDialog({
         </ol>
         <p className="text-xs text-muted-foreground">
           Its fixes go in a separate commit. Every commit is signed with your git signing key, and it stops before pushing if one is
-          not. It does not change code logic or tests, force-push, or merge the pull request.
+          not. Commits are attributed to you alone, with no Claude co-author line. It does not change code logic or tests, force-push,
+          or merge the pull request.
         </p>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
