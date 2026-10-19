@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
-import type { Board, BoardCard, PullDetail, ReviewState } from "./contract";
+import type { AddressChanges, Board, BoardCard, PullDetail, ReviewState } from "./contract";
 import { commentCount } from "./components/Comments";
 
 globalThis.ResizeObserver ??= class {
@@ -10,6 +10,7 @@ globalThis.ResizeObserver ??= class {
   unobserve() {}
   disconnect() {}
 };
+Element.prototype.scrollIntoView ??= () => {};
 
 const stored = new Map<string, string>();
 Object.defineProperty(window, "localStorage", {
@@ -58,6 +59,7 @@ function card(overrides: Partial<BoardCard>): BoardCard {
     isRequested: false,
     isAwaitingReply: false,
     agent: { threadId: null, running: false, findings: 0 },
+    address: null,
     ...overrides,
   };
 }
@@ -91,6 +93,7 @@ const DETAIL: PullDetail = {
   headRefName: "thing",
   baseRefName: "main",
   headSha: HEAD,
+  updatedAt: "2026-10-02T00:00:00Z",
   mergeBaseSha: MERGE_BASE,
   additions: 2,
   deletions: 1,
@@ -150,14 +153,27 @@ describe("board", () => {
     expect(slot.getByText("4 findings")).toBeTruthy();
     expect(slot.getByTitle("Comments waiting for your reply").textContent).toBe("1");
 
-    fireEvent.click(slot.getByRole("button", { name: "Mentioned" }));
-    expect(slot.queryByText("Draft work")).toBeNull();
+    for (const name of ["All", "Mine", "Requested", "Mentioned", "Awaiting reply"]) expect(slot.queryByRole("button", { name })).toBeNull();
+    expect(slot.getByText("Draft work")).toBeTruthy();
     expect(slot.getByText("Needs eyes")).toBeTruthy();
 
     fireEvent.click(slot.getByText("Needs eyes"));
     expect(slot.inspection.navigateCalls).toContainEqual(
       expect.objectContaining({ method: "toPluginPanel", path: "board", options: { subPath: "pr/acme/app/2" } }),
     );
+  });
+
+  it("marks cards with uncommitted, unpushed, or pushed changes from Address comments", async () => {
+    const cards = [
+      card({ number: 1, title: "Work in progress", address: { uncommitted: 2, unpushed: 1, pushed: 3 } }),
+      card({ number: 2, title: "All pushed", address: { uncommitted: 0, unpushed: 0, pushed: 1 } }),
+      card({ number: 3, title: "No address thread" }),
+    ];
+    const slot = renderSlot(boardPanel(), { subPath: "" }, { rpc: { board: () => ({ ...BOARD, cards }) } });
+    expect((await slot.findByText("2 uncommitted")).getAttribute("title")).toContain("2 files changed by Address comments");
+    expect(slot.getByText("1 to push").getAttribute("title")).toContain("1 commit from Address comments");
+    expect(slot.getAllByText("Pushed")).toHaveLength(1);
+    expect(slot.getByText("Pushed").getAttribute("title")).toContain("pushed to the PR branch");
   });
 
   it("refreshes every minute only while visible, and once when it becomes visible again", async () => {
@@ -229,7 +245,8 @@ describe("review workspace", () => {
       { rpc: workspaceRpc(STATE) },
     );
     expect(await slot.findByText("Add thing")).toBeTruthy();
-    expect(slot.getByText("Files 1/2")).toBeTruthy();
+    expect(slot.getByRole("tab", { name: "Files 1/2 viewed" })).toBeTruthy();
+    expect(slot.getByRole("heading", { name: "Files 1/2 viewed" })).toBeTruthy();
     expect(slot.getByText("agent working")).toBeTruthy();
     await waitFor(() => expect(slot.inspection.rpcCalls.filter((call) => call.method === "fileAt")).toHaveLength(2));
     expect(slot.inspection.rpcCalls.some((call) => call.method === "openReview")).toBe(false);
@@ -246,6 +263,7 @@ describe("review workspace", () => {
     expect(slot.getByText("Pending note")).toBeTruthy();
 
     fireEvent.click(slot.getByRole("tab", { name: "Findings 1" }));
+    expect(slot.getByRole("heading", { name: "Findings 1" })).toBeTruthy();
     expect(slot.getAllByText("Inline b into a")).toHaveLength(2);
 
     fireEvent.click(slot.getByRole("button", { name: /Submit review/ }));
@@ -413,6 +431,10 @@ describe("comments", () => {
       },
     );
     fireEvent.click(await slot.findByRole("tab", { name: "Comments 2" }));
+    const listed = (name: RegExp) => slot.getAllByRole("button", { name }).find((button) => button.getAttribute("aria-current") !== null || button.className.includes("rounded-md border"));
+    expect(listed(/carol\s*Rename b/)?.getAttribute("title")).toBe("Waiting for your reply");
+    expect(listed(/carol\s*Rename b/)?.style.color).toBe("var(--attention)");
+    expect(listed(/dave\s*Please add docs/)?.getAttribute("title")).toBeNull();
     expect(await slot.findByText("Rename b to c")).toBeTruthy();
     expect(slot.getByText("3 open suggestions. Accepted changes go to the address thread's worktree until you click Submit Address.")).toBeTruthy();
 
@@ -469,6 +491,91 @@ describe("comments", () => {
     await waitFor(() =>
       expect(slot.inspection.rpcCalls.filter((call) => call.method === "submitAddress").map((call) => call.input)).toEqual([{ repo: "acme/app", number: 10 }]),
     );
+  });
+
+  const COMMIT = "c".repeat(40);
+  const PUSHED = "d".repeat(40);
+  const CHANGES: AddressChanges = {
+    available: true,
+    reason: null,
+    head: COMMIT,
+    upstream: PUSHED,
+    uncommitted: [{ path: "docs/usage.md", previousPath: null, status: "U", commentIds: ["IC_1"] }],
+    unpushed: [
+      {
+        sha: COMMIT,
+        shortSha: "ccccccc",
+        subject: "Rename b to c",
+        files: [{ path: "cmd/main.go", previousPath: null, status: "M" }],
+        commentIds: ["PRRT_1"],
+      },
+    ],
+    pushed: [{ sha: PUSHED, shortSha: "ddddddd", subject: "Earlier fix", files: [{ path: "old.go", previousPath: null, status: "D" }], commentIds: [] }],
+    comments: [
+      { commentId: "PRRT_1", state: "committed", files: ["cmd/main.go"], sha: COMMIT, sources: ["suggestion"] },
+      { commentId: "IC_1", state: "uncommitted", files: ["docs/usage.md"], sha: null, sources: ["thread"] },
+    ],
+  };
+
+  it("lists the address changes like Source Control, shows a file's diff, and jumps to the comment a change addresses", async () => {
+    const slot = renderSlot(
+      boardPanel(),
+      { subPath: "pr/acme/app/13" },
+      {
+        rpc: workspaceRpc(SUGGESTED, {
+          pull: () => ({ ...COMMENTED, number: 13 }),
+          addressChanges: () => CHANGES,
+          addressDiff: (input) => ({ patch: `patch for ${(input as { path: string }).path}` }),
+        }),
+      },
+    );
+    fireEvent.click(await slot.findByRole("tab", { name: "Changes 2" }));
+    for (const name of ["Uncommitted (1)", "Committed, not pushed (1)", "Pushed (1)"]) expect(slot.getByText(name)).toBeTruthy();
+    expect(slot.getByLabelText("Untracked").textContent).toBe("U");
+
+    fireEvent.click(slot.getByRole("button", { name: /^usage\.md/ }));
+    expect((await slot.findByTestId("bb-diff")).textContent).toBe("patch for docs/usage.md");
+    const diffs = () => slot.inspection.rpcCalls.filter((call) => call.method === "addressDiff").map((call) => call.input);
+    expect(diffs()).toEqual([{ repo: "acme/app", number: 13, path: "docs/usage.md", sha: null }]);
+
+    fireEvent.click(slot.getByRole("button", { name: /ccccccc\s*Rename b to c/ }));
+    fireEvent.click(slot.getByRole("button", { name: /^main\.go/ }));
+    await waitFor(() => expect(slot.getByTestId("bb-diff").textContent).toBe("patch for cmd/main.go"));
+    expect(diffs().at(-1)).toEqual({ repo: "acme/app", number: 13, path: "cmd/main.go", sha: COMMIT });
+
+    fireEvent.click(slot.getAllByRole("button", { name: /addresses @carol's comment "Rename b"/ })[0]!);
+    expect(slot.getByRole("tab", { name: /^Comments/ }).getAttribute("aria-selected")).toBe("true");
+    expect(await slot.findByText("Committed ccccccc · not pushed")).toBeTruthy();
+  });
+
+  it("says when the address thread has no changes yet", async () => {
+    const empty: AddressChanges = { ...CHANGES, uncommitted: [], unpushed: [], pushed: [], comments: [] };
+    const slot = renderSlot(
+      boardPanel(),
+      { subPath: "pr/acme/app/14" },
+      { rpc: workspaceRpc(SUGGESTED, { pull: () => ({ ...COMMENTED, number: 14 }), addressChanges: () => empty }) },
+    );
+    fireEvent.click(await slot.findByRole("tab", { name: "Changes 0" }));
+    expect(await slot.findByText("No changes from Address comments yet.")).toBeTruthy();
+  });
+
+  it("shows on each comment whether its fix is uncommitted, committed, or pushed, and where it came from", async () => {
+    const pushed: AddressChanges = {
+      ...CHANGES,
+      comments: [
+        { commentId: "PRRT_1", state: "pushed", files: ["cmd/main.go"], sha: PUSHED, sources: ["suggestion", "thread"] },
+        { commentId: "IC_1", state: "uncommitted", files: ["docs/usage.md"], sha: null, sources: ["thread"] },
+      ],
+    };
+    const slot = renderSlot(
+      boardPanel(),
+      { subPath: "pr/acme/app/15" },
+      { rpc: workspaceRpc(SUGGESTED, { pull: () => ({ ...COMMENTED, number: 15 }), addressChanges: () => pushed }) },
+    );
+    fireEvent.click(await slot.findByRole("tab", { name: "Comments 2" }));
+    const chip = await slot.findByText("Pushed ddddddd");
+    expect(chip.getAttribute("title")).toBe("Files: cmd/main.go\nFrom: accepted suggestion and asked in the address thread");
+    expect(slot.getByText("Uncommitted fix").getAttribute("title")).toBe("Files: docs/usage.md\nFrom: asked in the address thread");
   });
 });
 
@@ -528,5 +635,19 @@ describe("thread tabs", () => {
     );
     await waitFor(() => expect(started.inspection.rpcCalls.some((call) => call.method === "reviewState")).toBe(true));
     await waitFor(() => expect(started.queryByText(/Loading the address thread|No address thread yet/)).toBeNull());
+  });
+});
+
+describe("saved board from an older version", () => {
+  it("renders cards that have no address field instead of crashing", async () => {
+    const old = { ...BOARD, cards: BOARD.cards.map(({ address: _address, ...rest }) => rest) };
+    window.localStorage.setItem("pr-board:cache:v2:board", JSON.stringify({ value: old, at: 1 }));
+    try {
+      const slot = renderSlot(boardPanel(), { subPath: "" }, { rpc: { board: () => new Promise<Board>(() => {}) } });
+      expect(await slot.findByText("Needs eyes")).toBeTruthy();
+      expect(slot.queryByText(/crashed/)).toBeNull();
+    } finally {
+      window.localStorage.removeItem("pr-board:cache:v2:board");
+    }
   });
 });

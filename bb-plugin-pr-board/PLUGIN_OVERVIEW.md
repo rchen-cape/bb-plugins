@@ -12,6 +12,11 @@ side-by-side diff.
 - A Comments tab, and an **Address comments** thread that suggests code changes
   and replies for each comment. You accept a change into the thread's worktree,
   or use a reply as the start of your own.
+- A **Changes** tab, like VS Code's Source Control view, that lists the
+  address thread's uncommitted files, commits not pushed, and pushed commits,
+  with their diffs and the comments each one addresses. Each comment shows
+  whether its fix is uncommitted, committed, or pushed, and board cards show
+  **N uncommitted**, **N to push**, or **Pushed**.
 - ⌘-click go to definition, using gopls for Go and a definition search for
   other languages.
 

@@ -8,6 +8,7 @@ export interface RunOptions {
   timeoutMs: number;
   input?: string;
   maxBuffer?: number;
+  okExitCodes?: readonly number[];
 }
 
 export type Runner = (command: string, args: readonly string[], options: RunOptions) => Promise<string>;
@@ -33,7 +34,7 @@ export const runCommand: Runner = (command, args, options) =>
         env: { ...process.env, GH_PROMPT_DISABLED: "1", GIT_TERMINAL_PROMPT: "0", NO_COLOR: "1" },
       },
       (error, stdout, stderr) => {
-        if (error === null) {
+        if (error === null || (typeof error.code === "number" && options.okExitCodes?.includes(error.code) === true)) {
           resolve(stdout);
           return;
         }
@@ -256,7 +257,7 @@ const PULL_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
   viewer { login }
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      id number title body url state isDraft isCrossRepository additions deletions headRefName baseRefName headRefOid baseRefOid
+      id number title body url state isDraft updatedAt isCrossRepository additions deletions headRefName baseRefName headRefOid baseRefOid
       author { login avatarUrl(size: 64) }
       reviewThreads(first: 100) {
         nodes {
@@ -288,6 +289,7 @@ const pullSchema = z.object({
         headRefName: z.string(),
         baseRefName: z.string(),
         headRefOid: z.string(),
+        updatedAt: z.string(),
         baseRefOid: z.string(),
         author: actorSchema.nullable(),
         reviewThreads: z.object({
@@ -387,6 +389,61 @@ export function pullAwaitingReply({ comments, reviews }: Pick<PullNode, "comment
   ].sort((a, b) => a.at.localeCompare(b.at));
   return awaitingReplyFrom(entries, viewer).map((entry) => entry.id);
 }
+
+const VERSION_QUERY = `query PullVersion($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { updatedAt headRefOid reviewThreads(first: 100) { nodes { isResolved } } }
+  }
+}`;
+
+const versionSchema = z.object({
+  data: z.object({
+    repository: z.object({
+      pullRequest: z.object({
+        updatedAt: z.string(),
+        headRefOid: z.string(),
+        reviewThreads: z.object({ nodes: z.array(z.object({ isResolved: z.boolean() })) }),
+      }),
+    }),
+  }),
+});
+
+function versionOf(updatedAt: string, headSha: string, resolved: readonly boolean[]): string {
+  return `${updatedAt}|${headSha}|${resolved.map((value) => (value ? "1" : "0")).join("")}`;
+}
+
+export function detailVersion(detail: Pick<PullDetail, "updatedAt" | "headSha" | "threads">): string {
+  return versionOf(detail.updatedAt, detail.headSha, detail.threads.map((thread) => thread.isResolved));
+}
+
+const OPEN_BRANCHES_QUERY = `query OpenPullBranches($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, first: 100, orderBy: { field: UPDATED_AT, direction: DESC }) {
+      nodes { number title url headRefName baseRefName isCrossRepository }
+    }
+  }
+}`;
+
+const openBranchesSchema = z.object({
+  data: z.object({
+    repository: z.object({
+      pullRequests: z.object({
+        nodes: z.array(
+          z.object({
+            number: z.number(),
+            title: z.string(),
+            url: z.string(),
+            headRefName: z.string(),
+            baseRefName: z.string(),
+            isCrossRepository: z.boolean(),
+          }),
+        ),
+      }),
+    }),
+  }),
+});
+
+export type OpenPullBranch = z.infer<typeof openBranchesSchema>["data"]["repository"]["pullRequests"]["nodes"][number];
 
 const VIEWED_QUERY = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
@@ -498,6 +555,15 @@ export function createGitHub(gh: Gh) {
       };
     },
 
+    async openPullBranches(repo: string): Promise<OpenPullBranch[]> {
+      return openBranchesSchema.parse(JSON.parse(await graphql(OPEN_BRANCHES_QUERY, split(repo)))).data.repository.pullRequests.nodes;
+    },
+
+    async pullVersion(repo: string, number: number): Promise<string> {
+      const pull = versionSchema.parse(JSON.parse(await graphql(VERSION_QUERY, { ...split(repo), number }))).data.repository.pullRequest;
+      return versionOf(pull.updatedAt, pull.headRefOid, pull.reviewThreads.nodes.map((thread) => thread.isResolved));
+    },
+
     async pullDetail(repo: string, number: number): Promise<PullDetail> {
       const [rawPull, rawFiles, viewed] = await Promise.all([
         graphql(PULL_QUERY, { ...split(repo), number }),
@@ -543,6 +609,7 @@ export function createGitHub(gh: Gh) {
         headRefName: pull.headRefName,
         baseRefName: pull.baseRefName,
         headSha: pull.headRefOid,
+        updatedAt: pull.updatedAt,
         mergeBaseSha,
         additions: pull.additions,
         deletions: pull.deletions,

@@ -3,7 +3,7 @@ import { parseDiffFromFile, type FileDiffMetadata } from "@pierre/diffs";
 import { FileDiff, type FileDiffProps } from "@pierre/diffs/react";
 import { Markdown, experimental_useCodeTheme, useBbNavigate, useRpc } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
-import type { ConversationComment, PullDetail, ReviewState, ReviewThread, Suggestion, SuggestionEdit, rpcContract } from "../contract";
+import type { CommentFixStatus, ConversationComment, FixSource, FixState, PullDetail, ReviewState, ReviewThread, Suggestion, SuggestionEdit, rpcContract } from "../contract";
 import { cn } from "../lib/utils";
 import { Avatar, relativeTime } from "./bits";
 import { errorMessage } from "./cache";
@@ -83,6 +83,48 @@ export function suggestionsByComment(suggestions: readonly Suggestion[]): Map<st
 
 export function openSuggestionParts(suggestion: Suggestion): number {
   return Number(suggestion.edits.length > 0 && suggestion.changeState === "open") + Number(suggestion.reply !== null && suggestion.replyState === "open");
+}
+
+const FIX_SOURCES: Record<FixSource, string> = { suggestion: "accepted suggestion", thread: "asked in the address thread" };
+const FIX_TONES: Record<FixState, string> = {
+  uncommitted: "bg-amber-500/15 text-amber-700 dark:text-amber-300",
+  committed: "bg-sky-500/15 text-sky-700 dark:text-sky-300",
+  pushed: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
+  none: "",
+};
+
+function fixLabel(fix: CommentFixStatus): string | null {
+  const short = fix.sha?.slice(0, 7) ?? "";
+  if (fix.state === "uncommitted") return "Uncommitted fix";
+  if (fix.state === "committed") return `Committed ${short} · not pushed`;
+  if (fix.state === "pushed") return `Pushed ${short}`;
+  return null;
+}
+
+export function FixStatusChip({ fix }: { fix: CommentFixStatus | undefined }) {
+  const label = fix === undefined ? null : fixLabel(fix);
+  if (fix === undefined || label === null) return null;
+  const title = `Files: ${fix.files.join(", ")}\nFrom: ${fix.sources.map((source) => FIX_SOURCES[source]).join(" and ")}`;
+  return (
+    <span className={cn("shrink-0 rounded px-1 text-[10px] font-semibold", FIX_TONES[fix.state])} title={title}>
+      {label}
+    </span>
+  );
+}
+
+export function commentLabels(detail: { threads: readonly ReviewThread[]; conversation: readonly ConversationComment[] }): Map<string, string> {
+  const label = (login: string, body: string) => `@${login}'s comment "${truncateText(snippet(body), 40)}"`;
+  const labels = new Map<string, string>();
+  for (const thread of detail.threads) {
+    const first = thread.comments[0];
+    if (first !== undefined) labels.set(thread.id, label(first.author.login, first.body));
+  }
+  for (const comment of detail.conversation) labels.set(comment.id, label(comment.author.login, comment.body));
+  return labels;
+}
+
+function truncateText(text: string, limit: number): string {
+  return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
 }
 
 function Stats({ additions, deletions }: { additions: number; deletions: number }) {
@@ -393,6 +435,7 @@ function CardShell({ focused, children }: { focused: CommentFocus | null; childr
 function CodeCommentCard({
   thread,
   suggestions,
+  fix,
   version,
   focused,
   showDismissed,
@@ -400,6 +443,7 @@ function CodeCommentCard({
 }: {
   thread: ReviewThread;
   suggestions: readonly Suggestion[];
+  fix: CommentFixStatus | undefined;
   version: number;
   focused: CommentFocus | null;
   showDismissed: boolean;
@@ -431,6 +475,7 @@ function CodeCommentCard({
           </span>
           {thread.isOutdated ? <span className="shrink-0 rounded border border-border px-1 text-[10px] text-muted-foreground">outdated</span> : null}
           {thread.isResolved ? <span className="shrink-0 text-xs text-emerald-600 dark:text-emerald-400">resolved</span> : null}
+          <FixStatusChip fix={fix} />
         </button>
         <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => actions.viewInDiff(thread)}>
           View in diff
@@ -487,6 +532,7 @@ function ConversationCard({
   comment,
   mine,
   suggestions,
+  fix,
   version,
   focused,
   showDismissed,
@@ -495,6 +541,7 @@ function ConversationCard({
   comment: ConversationComment;
   mine: boolean;
   suggestions: readonly Suggestion[];
+  fix: CommentFixStatus | undefined;
   version: number;
   focused: CommentFocus | null;
   showDismissed: boolean;
@@ -509,6 +556,7 @@ function ConversationCard({
         <div className="min-w-0 flex-1">
           <CommentBody author={comment.author} createdAt={comment.createdAt} body={comment.body} note={comment.kind === "review" ? "reviewed" : undefined} />
         </div>
+        <FixStatusChip fix={fix} />
         <button
           type="button"
           className="rounded p-1 text-muted-foreground hover:bg-state-hover hover:text-foreground"
@@ -577,11 +625,13 @@ function AddressStatus({ review, actions }: { review: ReviewState; actions: Comm
 export function CommentsView({
   detail,
   review,
+  fixes,
   focus,
   actions,
 }: {
   detail: PullDetail;
   review: ReviewState;
+  fixes: ReadonlyMap<string, CommentFixStatus>;
   focus: CommentFocus | null;
   actions: CommentActions;
 }) {
@@ -618,6 +668,7 @@ export function CommentsView({
               key={thread.id}
               thread={thread}
               suggestions={grouped.get(thread.id) ?? []}
+              fix={fixes.get(thread.id)}
               version={version}
               focused={focusFor(thread.id)}
               showDismissed={showDismissed}
@@ -635,6 +686,7 @@ export function CommentsView({
               comment={comment}
               mine={comment.author.login === detail.viewer}
               suggestions={grouped.get(comment.id) ?? []}
+              fix={fixes.get(comment.id)}
               version={version}
               focused={focusFor(comment.id)}
               showDismissed={showDismissed}
@@ -658,27 +710,44 @@ export function commentCount(detail: { threads: readonly ReviewThread[]; convers
   );
 }
 
+function waitingStyle(selected: boolean) {
+  const tint = `color-mix(in oklab, var(--attention) ${selected ? 32 : 22}%, transparent)`;
+  return {
+    color: "var(--attention)",
+    borderColor: "color-mix(in oklab, var(--attention) 55%, transparent)",
+    backgroundColor: tint,
+  };
+}
+
 export function CommentIndex({
   detail,
   suggestions,
   selectedId,
   onSelect,
 }: {
-  detail: { threads: readonly ReviewThread[]; conversation: readonly ConversationComment[] };
+  detail: { threads: readonly ReviewThread[]; conversation: readonly ConversationComment[]; viewer: string; awaitingReply: readonly string[] };
   suggestions: readonly Suggestion[];
   selectedId: string | null;
   onSelect(id: string): void;
 }) {
   const grouped = useMemo(() => suggestionsByComment(suggestions), [suggestions]);
   const threads = useMemo(() => sortThreads(detail.threads.filter((thread) => thread.comments.length > 0)), [detail.threads]);
+  const awaiting = new Set(detail.awaitingReply);
   const items = [
     ...threads.map((thread) => ({
       id: thread.id,
       comment: thread.comments[0]!,
       where: `${thread.path}${thread.line === null ? "" : `:${thread.line}`}`,
       resolved: thread.isResolved,
+      waiting: !thread.isResolved && thread.comments.at(-1)?.author.login !== detail.viewer,
     })),
-    ...detail.conversation.map((comment) => ({ id: comment.id, comment, where: comment.kind === "review" ? "Review" : "Conversation", resolved: false })),
+    ...detail.conversation.map((comment) => ({
+      id: comment.id,
+      comment,
+      where: comment.kind === "review" ? "Review" : "Conversation",
+      resolved: false,
+      waiting: awaiting.has(comment.id),
+    })),
   ];
   if (items.length === 0) return <p className="px-2 py-6 text-center text-xs text-muted-foreground">No comments yet.</p>;
   return (
@@ -691,8 +760,10 @@ export function CommentIndex({
               type="button"
               onClick={() => onSelect(item.id)}
               aria-current={selectedId === item.id ? "true" : undefined}
+              title={item.waiting ? "Waiting for your reply" : undefined}
+              style={item.waiting ? waitingStyle(selectedId === item.id) : undefined}
               className={cn(
-                "w-full rounded-md px-2 py-1.5 text-left text-xs outline-none hover:bg-state-hover focus-visible:ring-1 focus-visible:ring-ring",
+                "w-full rounded-md border border-transparent px-2 py-1.5 text-left text-xs outline-none hover:bg-state-hover focus-visible:ring-1 focus-visible:ring-ring",
                 selectedId === item.id && "bg-state-active",
                 item.resolved && "opacity-60",
               )}
@@ -700,14 +771,14 @@ export function CommentIndex({
               <span className="flex items-center gap-1.5">
                 <Avatar person={item.comment.author} />
                 <span className="shrink-0 font-medium">{item.comment.author.login}</span>
-                <span className="min-w-0 flex-1 truncate text-muted-foreground">{snippet(item.comment.body)}</span>
+                <span className={cn("min-w-0 flex-1 truncate", !item.waiting && "text-muted-foreground")}>{snippet(item.comment.body)}</span>
                 {open > 0 ? (
                   <span className="rounded bg-sky-500/15 px-1 text-[10px] font-semibold tabular-nums text-sky-700 dark:text-sky-300" title="Open suggestions">
                     {open}
                   </span>
                 ) : null}
               </span>
-              <span className="mt-0.5 block truncate font-mono text-[11px] text-muted-foreground">
+              <span className={cn("mt-0.5 block truncate font-mono text-[11px]", item.waiting ? "opacity-80" : "text-muted-foreground")}>
                 {item.where}
                 {item.resolved ? " · resolved" : ""}
               </span>

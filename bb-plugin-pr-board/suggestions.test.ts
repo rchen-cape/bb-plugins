@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { PullDetail } from "./contract";
-import { SUGGESTIONS_TOOL, addressMessage, addressPrompt, addressableIds, applyEdit, previewEdits, writePreviews } from "./suggestions";
+import { RECORD_FIX_TOOL, SUGGESTIONS_TOOL, addressMessage, addressPrompt, addressableIds, applyEdit, previewEdits, pullStack, writePreviews } from "./suggestions";
 
 function detail(overrides: Partial<PullDetail> = {}): PullDetail {
   const person = (login: string) => ({ login, avatarUrl: null });
@@ -21,6 +21,7 @@ function detail(overrides: Partial<PullDetail> = {}): PullDetail {
     headRefName: "thing",
     baseRefName: "main",
     headSha: "1".repeat(40),
+    updatedAt: "2026-10-02T00:00:00Z",
     mergeBaseSha: "3".repeat(40),
     additions: 1,
     deletions: 0,
@@ -166,6 +167,7 @@ describe("address prompts", () => {
     expect(prompt).not.toContain("IC_me");
     expect(prompt).toContain("Do not read or change files yet");
     expect(addressMessage(pull, false)).toContain(SUGGESTIONS_TOOL);
+    expect(addressMessage(pull, false)).toContain(`call the ${RECORD_FIX_TOOL} tool with that comment's id`);
     expect(addressMessage(pull, false)).not.toContain("[PRRT_open]");
     expect(addressMessage(pull, true)).toContain("[PRRT_open]");
     expect([...addressableIds(pull)]).toEqual(["PRRT_open"]);
@@ -177,5 +179,49 @@ describe("address prompts", () => {
     const answered = detail({ threads: [mine], awaitingReply: [] });
     expect(addressPrompt(answered)).toContain("No comments are waiting for a reply from you.");
     expect(addressableIds(answered).size).toBe(0);
+  });
+});
+
+describe("pullStack", () => {
+  const pr = (number: number, headRefName: string, baseRefName: string, isCrossRepository = false) => ({
+    number,
+    title: `PR ${number}`,
+    headRefName,
+    baseRefName,
+    isCrossRepository,
+  });
+
+  it("walks down to the bottom of the stack and up through every PR built on this one", () => {
+    const open = [
+      pr(1, "up/1", "main"),
+      pr(2, "up/2", "up/1"),
+      pr(3, "up/3", "up/2"),
+      pr(4, "up/4", "up/3"),
+      pr(5, "up/4b", "up/3"),
+      pr(6, "other", "main"),
+      pr(7, "up/2", "up/1", true),
+    ];
+    const stack = pullStack({ number: 3, headRefName: "up/3", baseRefName: "up/2" }, open);
+    expect(stack.below.map((entry) => entry.number)).toEqual([1, 2]);
+    expect(stack.above.map((entry) => entry.number)).toEqual([4, 5]);
+  });
+
+  it("stops on a branch loop and is empty for a PR outside any stack", () => {
+    const looped = pullStack({ number: 1, headRefName: "a", baseRefName: "b" }, [pr(2, "b", "a")]);
+    expect(looped.below.map((entry) => entry.number)).toEqual([2]);
+    expect(looped.above).toEqual([]);
+    expect(pullStack({ number: 6, headRefName: "other", baseRefName: "main" }, [pr(1, "up/1", "main")])).toEqual({ below: [], above: [] });
+  });
+
+  it("lists the stack in the prompt and asks the agent to check it with git", () => {
+    const stack = { below: [pr(6, "thing-base", "main")], above: [pr(8, "thing-2", "thing")] };
+    const prompt = addressPrompt(detail({ baseRefName: "thing-base" }), stack);
+    expect(prompt).toContain("#6 thing-base into main");
+    expect(prompt).toContain("#7 thing into thing-base \"Add thing\" (this PR)");
+    expect(prompt).toContain("#8 thing-2 into thing \"PR 8\" (above: builds on this PR)");
+    expect(prompt).toContain("git diff HEAD...origin/<branch>");
+    expect(prompt).toContain("Addressed in #123");
+    expect(addressPrompt(detail())).not.toContain("stack");
+    expect(addressMessage(detail(), true, stack)).toContain("#8 thing-2");
   });
 });

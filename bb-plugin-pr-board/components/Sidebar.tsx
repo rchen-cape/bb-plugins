@@ -1,12 +1,37 @@
 import { useMemo, useState } from "react";
-import type { ConversationComment, Draft, FileStatus, Finding, PullFile, ReviewThread, Severity, Suggestion } from "../contract";
+import type { AddressChanges, ConversationComment, Draft, FileStatus, Finding, PullFile, ReviewThread, Severity, Suggestion } from "../contract";
 import { cn } from "../lib/utils";
 import { SeverityBadge, lineLabel } from "./bits";
+import { ChangesIndex, pendingChanges, type ChangeTarget } from "./Changes";
 import { CommentIndex, commentCount } from "./Comments";
 import { Icon } from "./ui/icon";
 import { Input } from "./ui/input";
 
-export type SidebarTab = "files" | "findings" | "comments";
+export type SidebarTab = "files" | "findings" | "comments" | "changes";
+
+export interface SidebarChanges {
+  value: AddressChanges | null;
+  error: string | null;
+  refreshing: boolean;
+  labels: ReadonlyMap<string, string>;
+  selected: ChangeTarget | null;
+  onRefresh(): void;
+  onSelect(target: ChangeTarget): void;
+  onShowComment(id: string): void;
+}
+
+const BASE_TABS: readonly SidebarTab[] = ["files", "findings", "comments"];
+const ADDRESS_TABS: readonly SidebarTab[] = [...BASE_TABS, "changes"];
+const TAB_TITLES: Record<SidebarTab, string> = { files: "Files", findings: "Findings", comments: "Comments", changes: "Changes" };
+const TAB_ICONS: Record<SidebarTab, string> = { files: "FileText", findings: "Bug", comments: "MessageSquare", changes: "FileDiff" };
+
+function tabDetail(tab: SidebarTab, counts: Record<SidebarTab, string>): string {
+  return tab === "files" ? `${counts.files} viewed` : counts[tab];
+}
+
+function tabLabel(tab: SidebarTab, counts: Record<SidebarTab, string>): string {
+  return `${TAB_TITLES[tab]} ${tabDetail(tab, counts)}`;
+}
 
 const STATUS: Record<FileStatus, { letter: string; className: string }> = {
   added: { letter: "A", className: "text-emerald-600 dark:text-emerald-400" },
@@ -101,8 +126,10 @@ export function Sidebar({
   threads,
   conversation,
   viewer,
+  awaitingReply,
   suggestions,
   selectedCommentId,
+  changes,
   tab,
   onTab,
   onSelectFile,
@@ -117,8 +144,10 @@ export function Sidebar({
   threads: readonly ReviewThread[];
   conversation: readonly ConversationComment[];
   viewer: string;
+  awaitingReply: readonly string[];
   suggestions: readonly Suggestion[];
   selectedCommentId: string | null;
+  changes: SidebarChanges | null;
   tab: SidebarTab;
   onTab(tab: SidebarTab): void;
   onSelectFile(path: string): void;
@@ -143,6 +172,12 @@ export function Sidebar({
   );
   const shown = files.filter((file) => file.path.toLowerCase().includes(filter.trim().toLowerCase()));
   const viewed = files.filter((file) => file.viewed).length;
+  const tabCounts: Record<SidebarTab, string> = {
+    files: `${viewed}/${files.length}`,
+    findings: String(open.length),
+    comments: String(commentCount({ threads, conversation, viewer })),
+    changes: String(pendingChanges(changes?.value ?? null)),
+  };
   const listed = [...(showDismissed ? findings : open)].sort(
     (left, right) => Number(left.dismissed) - Number(right.dismissed) || SEVERITY_ORDER[left.severity] - SEVERITY_ORDER[right.severity],
   );
@@ -150,23 +185,29 @@ export function Sidebar({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 gap-1 border-b border-border p-1.5" role="tablist">
-        {(["files", "findings", "comments"] as const).map((id) => (
-          <button
-            key={id}
-            type="button"
-            role="tab"
-            aria-selected={tab === id}
-            onClick={() => onTab(id)}
-            className="flex-1 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring aria-selected:bg-state-active aria-selected:text-foreground"
-          >
-            {id === "files"
-              ? `Files ${viewed}/${files.length}`
-              : id === "findings"
-                ? `Findings ${open.length}`
-                : `Comments ${commentCount({ threads, conversation, viewer })}`}
-          </button>
-        ))}
+        {(changes === null ? BASE_TABS : ADDRESS_TABS).map((id) => {
+          const label = tabLabel(id, tabCounts);
+          return (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={tab === id}
+              aria-label={label}
+              title={label}
+              onClick={() => onTab(id)}
+              className="inline-flex min-w-0 flex-1 items-center justify-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium text-muted-foreground outline-none hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring aria-selected:bg-state-active aria-selected:text-foreground"
+            >
+              <Icon name={TAB_ICONS[id]} className="size-3.5 shrink-0" />
+              <span className="truncate tabular-nums">{tabCounts[id]}</span>
+            </button>
+          );
+        })}
       </div>
+      <h2 className="shrink-0 truncate px-3 pb-1 pt-2 text-xs font-semibold text-foreground">
+        {TAB_TITLES[tab]}{" "}
+        <span className="ml-1 font-normal tabular-nums text-muted-foreground">{tabDetail(tab, tabCounts)}</span>
+      </h2>
       {tab === "files" ? (
         <>
           <div className="shrink-0 p-1.5">
@@ -187,9 +228,22 @@ export function Sidebar({
             ))}
           </ul>
         </>
+      ) : tab === "changes" && changes !== null ? (
+        <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+          <ChangesIndex
+            changes={changes.value}
+            error={changes.error}
+            refreshing={changes.refreshing}
+            labels={changes.labels}
+            selected={changes.selected}
+            onRefresh={changes.onRefresh}
+            onSelect={changes.onSelect}
+            onSelectComment={changes.onShowComment}
+          />
+        </div>
       ) : tab === "comments" ? (
         <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
-          <CommentIndex detail={{ threads, conversation }} suggestions={suggestions} selectedId={selectedCommentId} onSelect={onSelectComment} />
+          <CommentIndex detail={{ threads, conversation, viewer, awaitingReply }} suggestions={suggestions} selectedId={selectedCommentId} onSelect={onSelectComment} />
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto p-1.5">

@@ -4,11 +4,14 @@ import { join, posix } from "node:path";
 import { PluginCliError, cliCommand, defineCli, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { columnFor, hasTakenPart, humanFeedbackCount, isAwaitingReplyFrom, reviewersOf, unansweredCount, type PullSnapshot } from "./board.js";
+import { addressCounts, locateFiles, readAddressChanges, readDiff, unavailableChanges, type Git } from "./changes.js";
 import { UPDATES_CHANNEL } from "./channel.js";
 import {
   rpcContract,
   severitySchema,
   sideSchema,
+  type AddressChanges,
+  type AddressCommit,
   type AgentState,
   type Board,
   type BoardCard,
@@ -16,20 +19,25 @@ import {
   type PullDetail,
 } from "./contract.js";
 import { findDefinitions } from "./definitions.js";
-import { createGitHub, runCommand, type Gh, type ListedPull, type Runner } from "./github.js";
-import { createStore, type PullKey } from "./store.js";
+import { createGitHub, detailVersion, runCommand, type Gh, type ListedPull, type Runner } from "./github.js";
+import { createStore, type NewFix, type PullKey } from "./store.js";
 import {
+  FIX_INSTRUCTION,
+  RECORD_FIX_TOOL,
   SUGGESTIONS_TOOL,
   addressMessage,
   addressPrompt,
   addressThreadTitle,
   addressableIds,
   previewEdits,
+  pullCommentIds,
+  pullStack,
+  type PullStack,
   submitAddressMessage,
   writePreviews,
 } from "./suggestions.js";
 
-export { SUGGESTIONS_TOOL, rpcContract };
+export { RECORD_FIX_TOOL, SUGGESTIONS_TOOL, rpcContract };
 
 const WORKTREE_PROVIDER_ID = "git-worktree";
 const REVIEW_PROVIDER_ID = "claude-code";
@@ -40,13 +48,15 @@ export const FINDINGS_TOOL = "pr_board_record_findings";
 const SKILL_NAME = "pr-board";
 const LIST_TTL_MS = 50_000;
 const DETAIL_REFRESH_MS = 15 * 60_000;
-const PULL_TTL_MS = 30_000;
+const PULL_TTL_MS = 50_000;
 const VIEWER_TTL_MS = 60 * 60_000;
 const FILE_CACHE_BYTES = 64 * 1024 * 1024;
 const ENVIRONMENT_TIMEOUT_MS = 5 * 60_000;
 const BODY_LIMIT = 4_000;
 const TITLE_LIMIT = 120;
 const MAX_EXTERNAL_BYTES = 2 * 1024 * 1024;
+const CHANGES_TTL_MS = 3_000;
+const CARD_CHANGES_CONCURRENCY = 4;
 
 const TOOL_CANDIDATES: Record<"gh" | "gopls", string[]> = {
   gh: ["gh", "/opt/homebrew/bin/gh", "/usr/local/bin/gh"],
@@ -160,9 +170,43 @@ const findingInputSchema = z.object({
   body: z.string().max(10_000),
 });
 
+const fixInputSchema = z.object({
+  commentId: z.string().min(1),
+  files: z.array(z.string().min(1).max(1024)).min(1).max(100),
+  summary: z.string().min(1).max(300),
+});
+
 function normalizeFindingPath(path: string, worktree: string | null): string {
   const withoutRoot = worktree !== null && path.startsWith(`${worktree}/`) ? path.slice(worktree.length + 1) : path;
   return withoutRoot.replace(/^(\.\/|\/)+/, "");
+}
+
+function toolError(text: string): { content: Array<{ type: "text"; text: string }>; isError: true } {
+  return { content: [{ type: "text", text }], isError: true };
+}
+
+function addressesLabel(commentIds: readonly string[]): string {
+  return commentIds.length === 0 ? "" : `\taddresses ${commentIds.join(", ")}`;
+}
+
+function commitSection(title: string, commits: readonly AddressCommit[]): string[] {
+  return [
+    `${title} (${commits.length})`,
+    ...commits.flatMap((commit) => [
+      `  ${commit.shortSha}\t${commit.subject}${addressesLabel(commit.commentIds)}`,
+      ...commit.files.map((file) => `    ${file.status}\t${file.path}`),
+    ]),
+  ];
+}
+
+export function changesLines(changes: AddressChanges): string[] {
+  if (!changes.available) return [changes.reason ?? "The address thread's worktree is not available."];
+  return [
+    `Uncommitted (${changes.uncommitted.length})`,
+    ...changes.uncommitted.map((file) => `  ${file.status}\t${file.path}${addressesLabel(file.commentIds)}`),
+    ...commitSection("Committed, not pushed", changes.unpushed),
+    ...commitSection("Pushed", changes.pushed),
+  ];
 }
 
 export function createPlugin(deps: PluginDeps) {
@@ -235,7 +279,9 @@ export function createPlugin(deps: PluginDeps) {
       return parseRepoList((await settings.get()).repos);
     }
 
+    const changesCache = new Map<string, Cached<Promise<AddressChanges>>>();
     function publish(pull: PullKey): void {
+      changesCache.delete(pullKey(pull));
       bb.realtime.publish(UPDATES_CHANNEL, { repo: pull.repo, number: pull.number });
     }
 
@@ -317,21 +363,65 @@ export function createPlugin(deps: PluginDeps) {
       return { pulls, errors };
     }
 
-    const pullCache = new Map<string, Cached<Promise<PullDetail>>>();
+    interface KnownPull {
+      detail: PullDetail;
+      version: string;
+      checkedAt: number;
+    }
+    const knownPulls = new Map<string, KnownPull>();
+    const pullRuns = new Map<string, Promise<PullDetail>>();
+
+    function knownPull(pull: PullKey): KnownPull | undefined {
+      const key = pullKey(pull);
+      const known = knownPulls.get(key);
+      if (known !== undefined) return known;
+      const saved = store.pullDetail(pull);
+      if (saved === null) return undefined;
+      const loaded = { ...saved, checkedAt: Number.NEGATIVE_INFINITY };
+      knownPulls.set(key, loaded);
+      return loaded;
+    }
+
+    function boardSaysUnchanged(pull: PullKey, detail: PullDetail): boolean {
+      if (listing === undefined || !fresh(listing, LIST_TTL_MS, deps.now())) return false;
+      const snapshot = [...snapshots.values()].find((entry) => pullKey(entry.value) === pullKey(pull));
+      if (snapshot === undefined) return false;
+      const listed = [...listing.value.involved, ...listing.value.requested].find((entry) => entry.id === snapshot.value.id);
+      return listed !== undefined && listed.updatedAt === detail.updatedAt;
+    }
+
+    async function loadPull(pull: PullKey, refresh: boolean): Promise<PullDetail> {
+      const generation = invalidations;
+      const known = refresh ? undefined : knownPull(pull);
+      if (known !== undefined) {
+        if (deps.now() - known.checkedAt < PULL_TTL_MS) return known.detail;
+        if (boardSaysUnchanged(pull, known.detail) || (await github.pullVersion(pull.repo, pull.number)) === known.version) {
+          if (generation === invalidations) known.checkedAt = deps.now();
+          return known.detail;
+        }
+      }
+      const detail = await github.pullDetail(pull.repo, pull.number);
+      const version = detailVersion(detail);
+      knownPulls.set(pullKey(pull), { detail, version, checkedAt: generation === invalidations ? deps.now() : Number.NEGATIVE_INFINITY });
+      store.savePullDetail(pull, version, detail);
+      return detail;
+    }
+
     function pullDetail(pull: PullKey, refresh: boolean): Promise<PullDetail> {
       const key = pullKey(pull);
-      const cached = pullCache.get(key);
-      if (!refresh && fresh(cached, PULL_TTL_MS, deps.now())) return cached.value;
-      const pending = github.pullDetail(pull.repo, pull.number);
-      pullCache.set(key, { value: pending, at: deps.now() });
-      pending.catch(() => {
-        if (pullCache.get(key)?.value === pending) pullCache.delete(key);
+      const running = pullRuns.get(key);
+      if (running !== undefined && !refresh) return running;
+      const run = loadPull(pull, refresh).finally(() => {
+        if (pullRuns.get(key) === run) pullRuns.delete(key);
       });
-      return pending;
+      pullRuns.set(key, run);
+      return run;
     }
 
     function invalidatePull(pull: PullKey): void {
-      pullCache.delete(pullKey(pull));
+      const known = knownPulls.get(pullKey(pull));
+      if (known !== undefined) known.checkedAt = Number.NEGATIVE_INFINITY;
+      pullRuns.delete(pullKey(pull));
       invalidations += 1;
       stalePulls.set(pullKey(pull), invalidations);
       if (listing !== undefined) listing = { ...listing, at: Number.NEGATIVE_INFINITY };
@@ -417,6 +507,7 @@ export function createPlugin(deps: PluginDeps) {
         (pull) => pull.author?.login === me || requestedIds.has(pull.id) || isMentioned(pull) || isAwaitingReplyFrom(pull, me),
       );
       const findingCounts = store.findingCounts();
+      const changeCounts = cardChangeCounts(pulls);
       const cards = await Promise.all(
         pulls.map(
           async (pull): Promise<BoardCard> => ({
@@ -443,6 +534,7 @@ export function createPlugin(deps: PluginDeps) {
             isRequested: requestedIds.has(pull.id),
             isAwaitingReply: pull.author?.login !== me && isAwaitingReplyFrom(pull, me),
             agent: await agentState(pull, findingCounts.get(pullKey(pull)) ?? 0),
+            address: (await changeCounts).get(pullKey(pull)) ?? null,
           }),
         ),
       );
@@ -566,11 +658,11 @@ export function createPlugin(deps: PluginDeps) {
       return { threadId: thread.id, created: true };
     }
 
-    async function sendAddress(threadId: string, pull: PullDetail, withList: boolean): Promise<"sent" | "queued"> {
+    async function sendAddress(threadId: string, pull: PullDetail, withList: boolean, stack?: PullStack): Promise<"sent" | "queued"> {
       const result = await bb.sdk.threads.send({
         threadId,
         mode: "auto",
-        input: [{ type: "text", text: addressMessage(pull, withList), mentions: [] }],
+        input: [{ type: "text", text: addressMessage(pull, withList, stack), mentions: [] }],
       });
       publish(pull);
       return result.delivery;
@@ -604,16 +696,24 @@ export function createPlugin(deps: PluginDeps) {
       const existing = await addressThreadFor(pull);
       if (existing !== null && preparing.has(existing.id)) return { threadId: existing.id, created: false, delivery: "queued" };
       if (addressableIds(detail).size === 0) throw new Error("No comments are waiting for your reply, so there is nothing to address.");
+      const stack = await github.openPullBranches(pull.repo).then(
+        (open) => pullStack(detail, open),
+        (error: unknown) => {
+          bb.log.warn(`could not read the PR stack of ${pullKey(pull)}: ${errorMessage(error)}`);
+          return undefined;
+        },
+      );
       if (existing !== null) {
         await updateAddressWorktree(existing.id, detail);
-        return { threadId: existing.id, created: false, delivery: await sendAddress(existing.id, detail, true) };
+        return { threadId: existing.id, created: false, delivery: await sendAddress(existing.id, detail, true, stack) };
       }
-      const thread = await spawnPullThread(detail, addressThreadTitle(detail), addressPrompt(detail), {
+      const thread = await spawnPullThread(detail, addressThreadTitle(detail), addressPrompt(detail, stack), {
         repo: pull.repo,
         number: pull.number,
         kind: "address",
       });
       store.recordAddressThread(thread.id, pull, deps.now());
+      store.setStartHead(thread.id, detail.headSha);
       publish(pull);
       preparing.add(thread.id);
       void prepareThen(thread.id, detail, `address/pr-${pull.number}`, () => sendAddress(thread.id, detail, false))
@@ -656,6 +756,64 @@ export function createPlugin(deps: PluginDeps) {
       return { threadId: thread.id, delivery: result.delivery };
     }
 
+    function worktreeGit(path: string): Git {
+      return (args, okExitCodes) => deps.run("git", args, { cwd: path, timeoutMs: 30_000, ...(okExitCodes === undefined ? {} : { okExitCodes }) });
+    }
+
+    async function loadAddressChanges(pull: PullKey): Promise<AddressChanges> {
+      const thread = await addressThreadFor(pull);
+      if (thread === null) return unavailableChanges("This PR has no address thread yet. Click Address comments first.");
+      const environment = await worktree(thread.id, null).catch(() => null);
+      if (environment === null) return unavailableChanges("The address thread's worktree is not available.");
+      const remoteHead = await pullDetail(pull, false).then(
+        (detail) => detail.headSha,
+        () => null,
+      );
+      return readAddressChanges(worktreeGit(environment.path), store.fixes(pull, thread.id), store.startHead(thread.id), remoteHead).catch((error: unknown) => {
+        bb.log.warn(`could not read the address changes of ${pullKey(pull)}: ${errorMessage(error)}`);
+        return unavailableChanges(`Could not read the address thread's worktree: ${errorMessage(error)}`);
+      });
+    }
+
+    function addressChanges(pull: PullKey, refresh = false): Promise<AddressChanges> {
+      const key = pullKey(pull);
+      const cached = changesCache.get(key);
+      if (!refresh && fresh(cached, CHANGES_TTL_MS, deps.now())) return cached.value;
+      const value = loadAddressChanges(pull);
+      changesCache.set(key, { value, at: deps.now() });
+      value.catch(() => {
+        if (changesCache.get(key)?.value === value) changesCache.delete(key);
+      });
+      return value;
+    }
+
+    async function cardChangeCounts(pulls: readonly PullKey[]): Promise<Map<string, BoardCard["address"]>> {
+      const queue = pulls.filter((pull) => store.addressThreadsForPull(pull).length > 0);
+      const counts = new Map<string, BoardCard["address"]>();
+      const worker = async () => {
+        for (let pull = queue.shift(); pull !== undefined; pull = queue.shift()) {
+          const key = pullKey(pull);
+          counts.set(
+            key,
+            await addressChanges(pull).then(addressCounts, (error: unknown) => {
+              bb.log.warn(`could not count the address changes of ${key}: ${errorMessage(error)}`);
+              return null;
+            }),
+          );
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(CARD_CHANGES_CONCURRENCY, queue.length) }, worker));
+      return counts;
+    }
+
+    async function addressDiff(pull: PullKey, path: string, sha: string | null): Promise<{ patch: string }> {
+      const thread = await addressThreadFor(pull);
+      const environment = thread === null ? null : await worktree(thread.id, null);
+      if (environment === null) throw new Error("The address thread's worktree is not available.");
+      const changes = await addressChanges(pull);
+      return { patch: await readDiff(worktreeGit(environment.path), changes, path, sha) };
+    }
+
     async function suggestionTarget(id: string) {
       const found = store.suggestion(id);
       if (found === null) throw new Error("That suggestion no longer exists.");
@@ -672,8 +830,16 @@ export function createPlugin(deps: PluginDeps) {
         const files = await previewEdits(environment.path, suggestion.edits).catch((error: unknown) => {
           throw new Error(`This change no longer applies: ${errorMessage(error)}`);
         });
+        const baseHead = (await worktreeGit(environment.path)(["rev-parse", "HEAD"])).trim();
         await writePreviews(environment.path, files);
         store.setChangeState(id, "applied");
+        store.setStartHead(threadId, baseHead);
+        store.recordFixes(
+          threadId,
+          pull,
+          [{ commentId: suggestion.commentId, source: "suggestion", suggestionId: id, files: files.map((file) => file.path), baseHead, summary: suggestion.summary }],
+          deps.now(),
+        );
         publish(pull);
       });
       applying = next.catch(() => undefined);
@@ -799,7 +965,11 @@ export function createPlugin(deps: PluginDeps) {
       },
       setViewed: async ({ repo, number, pullNodeId, path, viewed }) => {
         await github.setViewed(pullNodeId, path, viewed);
-        pullCache.delete(pullKey({ repo, number }));
+        const known = knownPulls.get(pullKey({ repo, number }));
+        if (known !== undefined) {
+          known.detail = { ...known.detail, files: known.detail.files.map((file) => (file.path === path ? { ...file, viewed } : file)) };
+          store.savePullDetail({ repo, number }, known.version, known.detail);
+        }
         return {};
       },
       dismissFinding: ({ id, dismissed }) => {
@@ -836,13 +1006,70 @@ export function createPlugin(deps: PluginDeps) {
         publish({ repo, number });
         return {};
       },
+      addressChanges: ({ repo, number, refresh }) => addressChanges({ repo, number }, refresh === true),
+      addressDiff: ({ repo, number, path, sha }) => addressDiff({ repo, number }, path, sha),
+    });
+
+    async function recordFixes(threadId: string, fixes: ReadonlyArray<z.infer<typeof fixInputSchema>>) {
+      const pull = store.pullForAddressThread(threadId);
+      if (pull === null) return toolError("This thread is not a PR Board address-comments thread.");
+      const environment = await worktree(threadId, null).catch(() => null);
+      if (environment === null) return toolError("This thread's worktree is not ready yet. Try again in a moment.");
+      const ids = pullCommentIds(await pullDetail(pull, false));
+      const changes = await addressChanges(pull, true);
+      if (!changes.available || changes.head === null) return toolError(changes.reason ?? "Could not read this thread's worktree.");
+      const errors: string[] = [];
+      const located = fixes.map((fix, index) => {
+        const label = `fix ${index + 1} (${fix.commentId})`;
+        const files = [...new Set(fix.files.map((path) => posix.normalize(normalizeFindingPath(path, environment.path))))];
+        if (!ids.has(fix.commentId)) errors.push(`${label}: this PR has no code comment thread or conversation comment with that id`);
+        const { missing, oldestCommit } = locateFiles(changes, files);
+        for (const path of missing) {
+          errors.push(`${label}: ${path} has no uncommitted change in this worktree and is not in a commit made here since the address thread started`);
+        }
+        return { fix, files, oldestCommit };
+      });
+      if (errors.length > 0) {
+        return toolError(`Nothing was recorded. Fix these and call ${RECORD_FIX_TOOL} again with every fix:\n${errors.join("\n")}`);
+      }
+      const git = worktreeGit(environment.path);
+      const head = changes.head;
+      const recorded = await Promise.all(
+        located.map(async ({ fix, files, oldestCommit }): Promise<NewFix> => ({
+          commentId: fix.commentId,
+          source: "thread",
+          suggestionId: null,
+          files,
+          baseHead: oldestCommit === null ? head : (await git(["rev-parse", `${oldestCommit}^`])).trim(),
+          summary: fix.summary.trim(),
+        })),
+      );
+      store.setStartHead(threadId, recorded[0]?.baseHead ?? head);
+      store.recordFixes(threadId, pull, recorded, deps.now());
+      publish(pull);
+      return `Linked ${recorded.length} fix${recorded.length === 1 ? "" : "es"} to comments on ${pullKey(pull)}. PR Board shows each one under its comment as uncommitted, committed, or pushed.`;
+    }
+
+    bb.agents.registerTool({
+      name: RECORD_FIX_TOOL,
+      description:
+        "Link file changes you made in this thread's worktree to the pull request comments they address, so PR Board shows under each comment whether its fix is uncommitted, committed, or pushed.",
+      instructions: `This thread addresses a pull request's comments for PR Board. ${FIX_INSTRUCTION} Use the comment ids in brackets from the comment list. Do not call it for edits PR Board applied from an accepted suggestion; those are linked already.`,
+      presentation: { label: { pending: "Linking changes to comments", completed: "Linked changes to comments" } },
+      parameters: z.object({ fixes: z.array(fixInputSchema).min(1).max(50) }),
+      execute: ({ fixes }, { threadId }) => recordFixes(threadId, fixes),
+    });
+
+    bb.events.on("thread.idle", ({ thread }) => {
+      const pull = store.pullForAddressThread(thread.id);
+      if (pull !== null) publish(pull);
     });
 
     bb.agents.registerTool({
       name: SUGGESTIONS_TOOL,
       description:
         "Record suggested code changes and replies for this thread's pull request comments so PR Board shows them under each comment. Each call replaces the suggestions recorded before unless replace is false.",
-      instructions: `This thread addresses the comments of a pull request for PR Board without changing files. Call ${SUGGESTIONS_TOOL} once with every suggestion, using the comment ids from the comment list.`,
+      instructions: `This thread addresses the comments of a pull request for PR Board by suggesting changes and replies, without changing files unless the user asks it to. Call ${SUGGESTIONS_TOOL} once with every suggestion, using the comment ids from the comment list.`,
       presentation: { label: { pending: "Recording comment suggestions", completed: "Recorded comment suggestions" } },
       parameters: z.object({
         suggestions: z.array(suggestionInputSchema).max(200),
@@ -934,7 +1161,7 @@ export function createPlugin(deps: PluginDeps) {
     bb.agents.configure((context) => {
       const { repo, number, kind } = context.pluginMetadata;
       const isPullThread = typeof repo === "string" && /^[\w.-]+\/[\w.-]+$/.test(repo) && typeof number === "number";
-      return { tools: !isPullThread ? [] : kind === "address" ? [SUGGESTIONS_TOOL] : [FINDINGS_TOOL], skills: [SKILL_NAME] };
+      return { tools: !isPullThread ? [] : kind === "address" ? [SUGGESTIONS_TOOL, RECORD_FIX_TOOL] : [FINDINGS_TOOL], skills: [SKILL_NAME] };
     });
 
     const jsonOption = { json: { type: "boolean", description: "Print the result as JSON" } } as const;
@@ -1052,6 +1279,16 @@ export function createPlugin(deps: PluginDeps) {
                   ].join("\t"),
                 ),
               );
+            },
+          }),
+          changes: cliCommand({
+            summary:
+              "List a PR's changes from Address comments in its address thread's worktree: uncommitted files, commits not pushed, and pushed commits, with the comments each one addresses",
+            positionals: pullPositional,
+            options: jsonOption,
+            async run(input) {
+              const changes = await addressChanges(await pullArgument(input.positionals.pull), true);
+              return output(input.options.json, changes, changesLines(changes));
             },
           }),
         },

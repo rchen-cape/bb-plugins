@@ -4,6 +4,7 @@ import { dirname, resolve, sep } from "node:path";
 import type { ConversationComment, PullDetail, ReviewThread, SuggestionEdit } from "./contract.js";
 
 export const SUGGESTIONS_TOOL = "pr_board_record_suggestions";
+export const RECORD_FIX_TOOL = "pr_board_record_fix";
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const COMMENT_LIMIT = 1_500;
 
@@ -113,6 +114,12 @@ export function addressableIds(detail: PullDetail): Set<string> {
   return new Set([...threads.map((thread) => thread.id), ...conversation.map((comment) => comment.id)]);
 }
 
+export function pullCommentIds(detail: Pick<PullDetail, "threads" | "conversation">): Set<string> {
+  return new Set([...detail.threads.map((thread) => thread.id), ...detail.conversation.map((comment) => comment.id)]);
+}
+
+export const FIX_INSTRUCTION = `If the user asks you in this thread to fix a specific comment yourself, edit the files then, and right after the edit, before any commit, call the ${RECORD_FIX_TOOL} tool with that comment's id and the repository-relative files you changed for it, so PR Board shows the fix under the comment.`;
+
 function commentList(detail: PullDetail): string[] {
   const { threads, conversation } = commentsToAddress(detail);
   const who = (login: string) => (login === detail.viewer ? `@${login} (you)` : `@${login}`);
@@ -140,10 +147,63 @@ export function addressThreadTitle(pull: Pick<PullDetail, "repo" | "number" | "t
   return truncate(`Address comments ${pull.repo.slice(pull.repo.indexOf("/") + 1)}#${pull.number}: ${pull.title}`, 120);
 }
 
-export function addressPrompt(pull: PullDetail): string {
+export interface StackPull {
+  number: number;
+  title: string;
+  headRefName: string;
+  baseRefName: string;
+  isCrossRepository: boolean;
+}
+
+export interface PullStack {
+  below: StackPull[];
+  above: StackPull[];
+}
+
+export function pullStack(pull: Pick<PullDetail, "number" | "headRefName" | "baseRefName">, open: readonly StackPull[]): PullStack {
+  const sameRepo = open.filter((candidate) => !candidate.isCrossRepository && candidate.number !== pull.number);
+  const seen = new Set([pull.headRefName]);
+  const below: StackPull[] = [];
+  for (let base = pull.baseRefName; !seen.has(base); ) {
+    seen.add(base);
+    const parent = sameRepo.find((candidate) => candidate.headRefName === base);
+    if (parent === undefined) break;
+    below.unshift(parent);
+    base = parent.baseRefName;
+  }
+  const above: StackPull[] = [];
+  const queue = [pull.headRefName];
+  for (let branch = queue.shift(); branch !== undefined; branch = queue.shift()) {
+    for (const child of sameRepo.filter((candidate) => candidate.baseRefName === branch && !seen.has(candidate.headRefName))) {
+      seen.add(child.headRefName);
+      above.push(child);
+      queue.push(child.headRefName);
+    }
+  }
+  return { below, above };
+}
+
+function stackLines(pull: PullDetail, stack: PullStack): string[] {
+  if (stack.below.length + stack.above.length === 0) return [];
+  const line = (entry: Pick<StackPull, "number" | "title" | "headRefName" | "baseRefName">, where: string) =>
+    `  #${entry.number} ${entry.headRefName} into ${entry.baseRefName} "${truncate(entry.title, 100)}" (${where})`;
+  return [
+    "",
+    "This PR is part of a stack of open PRs, bottom first:",
+    ...stack.below.map((entry) => line(entry, "below: this PR builds on it")),
+    line(pull, "this PR"),
+    ...stack.above.map((entry) => line(entry, "above: builds on this PR")),
+    "Before suggesting a change for a comment, check the rest of the stack with git, not gh (it costs no GitHub API calls):",
+    "- PRs above: `git fetch origin <branch>` and `git diff HEAD...origin/<branch> -- <path>`. If one already makes the change the comment asks for, suggest only a reply that names it (for example \"Addressed in #123\") and no change.",
+    "- PRs below: if the code the comment is about comes from a PR below (its changes are already in this branch; compare with `git diff origin/<its base>...origin/<its branch> -- <path>`), say the fix belongs in that PR and suggest only a reply.",
+  ];
+}
+
+export function addressPrompt(pull: PullDetail, stack: PullStack = { below: [], above: [] }): string {
   return [
     `You are the comment-addressing thread for ${pull.repo}#${pull.number} "${pull.title}" by @${pull.author.login}: ${pull.url}`,
     `Branch ${pull.headRefName} into ${pull.baseRefName}. PR Board shows your suggestions under each comment, and the user decides what to apply or post.`,
+    ...stackLines(pull, stack),
     "",
     ...commentList(pull),
     "",
@@ -151,14 +211,15 @@ export function addressPrompt(pull: PullDetail): string {
   ].join("\n");
 }
 
-export function addressMessage(pull: PullDetail, withList: boolean): string {
+export function addressMessage(pull: PullDetail, withList: boolean, stack: PullStack = { below: [], above: [] }): string {
   return [
     withList
       ? "Here are the PR's current comments. Suggest again how to address them; your new suggestions replace the earlier ones."
       : "The PR head is now checked out in this worktree. Suggest how to address the comments listed above.",
     `The PR head is ${pull.headSha}. If \`git rev-parse HEAD\` differs, run \`git pull --ff-only\` first; if that fails, say so and stop.`,
-    ...(withList ? ["", ...commentList(pull), ""] : []),
-    "- Do not edit, create, or delete files, and do not commit or push. PR Board applies a change only when the user accepts it. The worktree may already hold changes the user accepted from earlier suggestions, so read the current files.",
+    ...(withList ? [...stackLines(pull, stack), "", ...commentList(pull), ""] : []),
+    "- Suggest by default: for these suggestions, do not edit, create, or delete files, and do not commit or push. PR Board applies a change only when the user accepts it. The worktree may already hold changes the user accepted from earlier suggestions, so read the current files.",
+    `- ${FIX_INSTRUCTION}`,
     "- Every listed comment is waiting for your reply: someone else spoke last. Address only these; comments where you replied last are left out on purpose. For each one, propose a code change, a reply, or both. Skip ones that need nothing, such as bot status reports.",
     "- A change is a list of edits. Each edit has a repository-relative `path`, `find` (text copied exactly from the current file that appears there exactly once; include a few surrounding lines), and `replace` (the new text). Use an empty `find` to create a new file. Edits in one change apply in order, so a later `find` must match the file after the earlier edits; do not overlap them.",
     `- A reply is what @${pull.viewer} could post: short and specific. With a change, the reply can say what changed. A reply to a conversation comment is posted as a new PR comment, so start it with an @mention of the commenter.`,

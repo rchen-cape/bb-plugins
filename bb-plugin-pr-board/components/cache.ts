@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const MEMORY_LIMIT = 200;
-const STORAGE_PREFIX = "pr-board:cache:v1:";
+const STORAGE_PREFIX = "pr-board:cache:v2:";
 
 interface Entry<T> {
   value: T;

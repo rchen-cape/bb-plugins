@@ -17,7 +17,8 @@ import { isCommentable } from "../patch";
 import type { PullRoute } from "../routes";
 import { cn } from "../lib/utils";
 import type { Composer, ReviewActions } from "./Annotations";
-import { CommentsView, type CommentActions } from "./Comments";
+import { ChangeDiffPane, type ChangeTarget } from "./Changes";
+import { CommentsView, commentLabels, type CommentActions } from "./Comments";
 import { ToolbarToggle } from "./bits";
 import { errorMessage, useCached } from "./cache";
 import { DiffPane, type DefinitionRequest, type DiffFocus } from "./DiffPane";
@@ -34,7 +35,8 @@ import { useWidth } from "./use-width";
 type Location =
   | { kind: "diff"; path: string; focus: DiffFocus | null }
   | { kind: "peek"; target: PeekTarget }
-  | { kind: "comments"; commentId: string | null; seq: number };
+  | { kind: "comments"; commentId: string | null; seq: number }
+  | { kind: "change"; target: ChangeTarget };
 
 type DiffStylePreference = DiffStyle | "auto";
 
@@ -155,6 +157,24 @@ function Workspace({
   const [addressing, setAddressing] = useState(false);
   const seq = useRef(0);
   const nextSeq = () => ++seq.current;
+  const addressThreadId = review.addressAgent.threadId;
+  const forceChanges = useRef(false);
+  const changes = useCached(`changes:${pullKey}:${addressThreadId ?? "none"}`, () => {
+    const refresh = forceChanges.current;
+    forceChanges.current = false;
+    return addressThreadId === null ? Promise.resolve(null) : rpc.call("addressChanges", { ...pull, refresh });
+  });
+  const [changesVersion, setChangesVersion] = useState(0);
+  useEffect(() => setChangesVersion((value) => value + 1), [changes.value]);
+  useRealtime(UPDATES_CHANNEL, (payload) => {
+    if (samePull(payload, pull)) changes.reload();
+  });
+  const refreshChanges = () => {
+    forceChanges.current = true;
+    changes.reload();
+  };
+  const labels = useMemo(() => commentLabels(detail), [detail]);
+  const fixes = useMemo(() => new Map((changes.value?.comments ?? []).map((fix) => [fix.commentId, fix])), [changes.value]);
 
   const files = useMemo(
     () => detail.files.map((file) => ({ ...file, viewed: viewed.get(file.path) ?? file.viewed })),
@@ -189,7 +209,8 @@ function Workspace({
     setHistory(history.slice(0, -1));
     setLocation(last.kind === "diff" && last.focus !== null ? { ...last, focus: { ...last.focus, seq: ++seq.current } } : last);
     if (last.kind === "comments") setTab("comments");
-    else if (current?.kind === "comments") setTab("files");
+    else if (last.kind === "change") setTab("changes");
+    else if (current?.kind === "comments" || current?.kind === "change") setTab("files");
     setPicker(null);
   }, [current?.kind, history]);
 
@@ -198,7 +219,7 @@ function Workspace({
     setTab(next);
     if (next === "comments") {
       if (current?.kind !== "comments") goTo({ kind: "comments", commentId: null, seq: nextSeq() }, true);
-    } else if (current?.kind === "comments") {
+    } else if (next !== "changes" && (current?.kind === "comments" || current?.kind === "change")) {
       const last = lastPaths.get(pullKey);
       const path = last !== undefined && files.some((file) => file.path === last) ? last : firstPath;
       if (path !== undefined) goTo({ kind: "diff", path, focus: null }, false);
@@ -209,6 +230,11 @@ function Workspace({
     setLocation((previous) => (previous?.kind === "comments" ? previous : { kind: "comments", commentId: null, seq: nextSeq() }));
   };
   const selectComment = (commentId: string) => goTo({ kind: "comments", commentId, seq: nextSeq() }, current?.kind !== "comments");
+  const showComment = (commentId: string) => {
+    setTab("comments");
+    selectComment(commentId);
+  };
+  const selectChange = (target: ChangeTarget) => goTo({ kind: "change", target }, current?.kind !== "change");
   const stepFile = useCallback(
     (delta: number) => {
       const index = files.findIndex((file) => file.path === currentFile?.path);
@@ -445,9 +471,12 @@ function Workspace({
 
   useEffect(() => {
     if (!review.addressAgent.running) return;
-    const timer = setInterval(reloadState, ADDRESS_POLL_MS);
+    const timer = setInterval(() => {
+      reloadState();
+      changes.reload();
+    }, ADDRESS_POLL_MS);
     return () => clearInterval(timer);
-  }, [reloadState, review.addressAgent.running]);
+  }, [changes.reload, reloadState, review.addressAgent.running]);
 
   const scoped = useMemo(() => {
     const path = currentFile?.path;
@@ -476,8 +505,23 @@ function Workspace({
       threads={detail.threads}
       conversation={detail.conversation}
       viewer={detail.viewer}
+      awaitingReply={detail.awaitingReply}
       suggestions={review.suggestions}
       selectedCommentId={current?.kind === "comments" ? current.commentId : null}
+      changes={
+        addressThreadId === null
+          ? null
+          : {
+              value: changes.value,
+              error: changes.error,
+              refreshing: changes.refreshing,
+              labels,
+              selected: current?.kind === "change" ? current.target : null,
+              onRefresh: refreshChanges,
+              onSelect: selectChange,
+              onShowComment: showComment,
+            }
+      }
       tab={tab}
       onTab={changeTab}
       onSelectFile={selectFile}
@@ -552,7 +596,9 @@ function Workspace({
                   ? "Definition"
                   : current?.kind === "comments"
                     ? "Comments"
-                    : ""
+                    : current?.kind === "change"
+                      ? `Changes  ${current.target.path}`
+                      : ""
                 : `${currentIndex + 1}/${files.length}  ${currentFile.path}`}
             </span>
             {narrow ? null : <span className="hidden text-[11px] text-muted-foreground 2xl:inline">⌘-click a symbol to go to its definition · j/k files</span>}
@@ -634,10 +680,24 @@ function Workspace({
                 <CommentsView
                   detail={detail}
                   review={review}
+                  fixes={fixes}
                   focus={current?.kind === "comments" && current.commentId !== null ? { commentId: current.commentId, seq: current.seq } : null}
                   actions={commentActions}
                 />
               </div>
+            ) : null}
+            {current?.kind === "change" ? (
+              <ChangeDiffPane
+                key={`${current.target.sha ?? "worktree"}:${current.target.path}`}
+                pull={pull}
+                target={current.target}
+                changes={changes.value}
+                version={changesVersion}
+                labels={labels}
+                diffStyle={diffStyle}
+                wrap={wrap}
+                onSelectComment={showComment}
+              />
             ) : null}
             {current?.kind === "peek" ? (
               <PeekPane

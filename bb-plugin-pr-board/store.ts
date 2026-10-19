@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { changeStateSchema, replyStateSchema, suggestionEditSchema, type Draft, type Finding, type Severity, type Side, type Suggestion, type SuggestionEdit } from "./contract.js";
+import { changeStateSchema, fixSourceSchema, pullDetailSchema, replyStateSchema, suggestionEditSchema, type Draft, type Finding, type FixSource, type PullDetail, type Severity, type Side, type Suggestion, type SuggestionEdit } from "./contract.js";
 
 export interface PullKey {
   repo: string;
@@ -38,6 +38,46 @@ interface SuggestionRow {
 }
 
 const editsSchema = z.array(suggestionEditSchema);
+
+export interface NewFix {
+  commentId: string;
+  source: FixSource;
+  suggestionId: string | null;
+  files: string[];
+  baseHead: string;
+  summary: string;
+}
+
+export interface CommentFix extends NewFix {
+  id: string;
+  createdAt: number;
+}
+
+interface FixRow {
+  id: string;
+  comment_id: string;
+  source: string;
+  suggestion_id: string | null;
+  files: string;
+  base_head: string;
+  summary: string;
+  created_at: number;
+}
+
+const filesSchema = z.array(z.string());
+
+function toFix(row: FixRow): CommentFix {
+  return {
+    id: row.id,
+    commentId: row.comment_id,
+    source: fixSourceSchema.parse(row.source),
+    suggestionId: row.suggestion_id,
+    files: filesSchema.parse(JSON.parse(row.files)),
+    baseHead: row.base_head,
+    summary: row.summary,
+    createdAt: row.created_at,
+  };
+}
 
 interface FindingRow {
   id: string;
@@ -152,6 +192,28 @@ export function createStore(storage: BbPluginApi["storage"]) {
       position INTEGER NOT NULL
     )`,
     `CREATE INDEX suggestions_pull ON suggestions (repo, number, position)`,
+    `CREATE TABLE pull_details (
+      repo TEXT NOT NULL,
+      number INTEGER NOT NULL,
+      version TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      PRIMARY KEY (repo, number)
+    )`,
+    `CREATE TABLE comment_fixes (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      repo TEXT NOT NULL,
+      number INTEGER NOT NULL,
+      comment_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      suggestion_id TEXT,
+      files TEXT NOT NULL,
+      base_head TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`,
+    `CREATE INDEX comment_fixes_pull ON comment_fixes (repo, number, created_at)`,
+    `ALTER TABLE address_threads ADD COLUMN address_start_head TEXT`,
   ]);
 
   const statements = {
@@ -217,6 +279,18 @@ export function createStore(storage: BbPluginApi["storage"]) {
     maxSuggestionPosition: db.prepare("SELECT COALESCE(MAX(position), -1) AS position FROM suggestions WHERE repo = ? AND number = ?"),
     setReplyState: db.prepare("UPDATE suggestions SET reply_state = ? WHERE id = ?"),
     setChangeState: db.prepare("UPDATE suggestions SET change_state = ? WHERE id = ?"),
+    pullDetail: db.prepare("SELECT version, detail FROM pull_details WHERE repo = ? AND number = ?"),
+    savePullDetail: db.prepare("INSERT OR REPLACE INTO pull_details (repo, number, version, detail) VALUES (?, ?, ?, ?)"),
+    forgetPullDetail: db.prepare("DELETE FROM pull_details WHERE repo = ? AND number = ?"),
+    insertFix: db.prepare(
+      `INSERT INTO comment_fixes (id, thread_id, repo, number, comment_id, source, suggestion_id, files, base_head, summary, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ),
+    fixes: db.prepare(
+      "SELECT id, comment_id, source, suggestion_id, files, base_head, summary, created_at FROM comment_fixes WHERE repo = ? AND number = ? AND thread_id = ? ORDER BY created_at, rowid",
+    ),
+    setStartHead: db.prepare("UPDATE address_threads SET address_start_head = ? WHERE thread_id = ? AND address_start_head IS NULL"),
+    startHead: db.prepare("SELECT address_start_head FROM address_threads WHERE thread_id = ?"),
   };
 
   return {
@@ -327,8 +401,48 @@ export function createStore(storage: BbPluginApi["storage"]) {
     setReplyState(id: string, state: Suggestion["replyState"]): void {
       statements.setReplyState.run(state, id);
     },
+    pullDetail(pull: PullKey): { version: string; detail: PullDetail } | null {
+      const row = statements.pullDetail.get(pull.repo, pull.number) as { version: string; detail: string } | undefined;
+      if (row === undefined) return null;
+      const parsed = pullDetailSchema.safeParse(JSON.parse(row.detail));
+      return parsed.success ? { version: row.version, detail: parsed.data } : null;
+    },
+    savePullDetail(pull: PullKey, version: string, detail: PullDetail): void {
+      statements.savePullDetail.run(pull.repo, pull.number, version, JSON.stringify(detail));
+    },
+    forgetPullDetail(pull: PullKey): void {
+      statements.forgetPullDetail.run(pull.repo, pull.number);
+    },
     setChangeState(id: string, state: Suggestion["changeState"]): void {
       statements.setChangeState.run(state, id);
+    },
+    recordFixes(threadId: string, pull: PullKey, fixes: readonly NewFix[], now: number): void {
+      db.transaction(() => {
+        for (const fix of fixes) {
+          statements.insertFix.run(
+            randomUUID(),
+            threadId,
+            pull.repo,
+            pull.number,
+            fix.commentId,
+            fix.source,
+            fix.suggestionId,
+            JSON.stringify(fix.files),
+            fix.baseHead,
+            fix.summary,
+            now,
+          );
+        }
+      })();
+    },
+    fixes(pull: PullKey, threadId: string): CommentFix[] {
+      return (statements.fixes.all(pull.repo, pull.number, threadId) as FixRow[]).map(toFix);
+    },
+    setStartHead(threadId: string, head: string): void {
+      statements.setStartHead.run(head, threadId);
+    },
+    startHead(threadId: string): string | null {
+      return (statements.startHead.get(threadId) as { address_start_head: string | null } | undefined)?.address_start_head ?? null;
     },
   };
 }

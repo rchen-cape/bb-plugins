@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { UPDATES_CHANNEL } from "../channel";
-import type { BoardCard, Checks, Column, ReviewerState, rpcContract } from "../contract";
+import type { AddressCounts, BoardCard, Checks, Column, ReviewerState, rpcContract } from "../contract";
 import { BOARD_PANEL, workspacePath } from "../routes";
 import { cn } from "../lib/utils";
 import { Avatar, relativeTime } from "./bits";
@@ -18,17 +18,8 @@ const COLUMNS: ReadonlyArray<{ id: Column; title: string; hint: string }> = [
   { id: "ready", title: "Ready", hint: "Approved" },
 ];
 
-type Scope = "all" | "mine" | "requested" | "mentioned" | "awaiting";
 type Layout = "columns" | "rows";
 
-const SCOPES: ReadonlyArray<{ id: Scope; label: string }> = [
-  { id: "all", label: "All" },
-  { id: "mine", label: "Mine" },
-  { id: "requested", label: "Requested" },
-  { id: "mentioned", label: "Mentioned" },
-  { id: "awaiting", label: "Awaiting reply" },
-];
-const SCOPE_IDS = SCOPES.map((scope) => scope.id);
 const LAYOUTS: ReadonlyArray<{ id: Layout; label: string; icon: string }> = [
   { id: "columns", label: "Columns", icon: "Columns2" },
   { id: "rows", label: "Rows", icon: "Rows2" },
@@ -61,11 +52,7 @@ function prefersRows(): boolean {
   return window.matchMedia?.("(orientation: portrait)").matches === true;
 }
 
-function matches(card: BoardCard, query: string, scope: Scope): boolean {
-  if (scope === "mine" && !card.isAuthor) return false;
-  if (scope === "requested" && !card.isRequested) return false;
-  if (scope === "mentioned" && !card.isMentioned) return false;
-  if (scope === "awaiting" && !card.isAwaitingReply) return false;
+function matches(card: BoardCard, query: string): boolean {
   if (query.length === 0) return true;
   const haystack = `${cardKey(card)} ${card.title} ${card.author.login} ${card.headRefName}`.toLowerCase();
   return query
@@ -95,6 +82,51 @@ function AgentBadge({ card }: { card: BoardCard }) {
       {card.agent.findings > 0 ? `${card.agent.findings} findings` : "Reviewed"}
     </span>
   );
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+interface Chip {
+  label: string;
+  title: string;
+  className: string;
+}
+
+function addressChips(address: AddressCounts): Chip[] {
+  const chips: Chip[] = [];
+  if (address.uncommitted > 0) {
+    chips.push({
+      label: `${address.uncommitted} uncommitted`,
+      title: `${plural(address.uncommitted, "file")} changed by Address comments in its thread's worktree, not committed yet`,
+      className: "bg-amber-500/15 text-amber-700 dark:text-amber-300",
+    });
+  }
+  if (address.unpushed > 0) {
+    chips.push({
+      label: `${address.unpushed} to push`,
+      title: `${plural(address.unpushed, "commit")} from Address comments, committed in its thread's worktree but not pushed to the PR branch`,
+      className: "bg-sky-500/15 text-sky-700 dark:text-sky-300",
+    });
+  }
+  if (chips.length === 0 && address.pushed > 0) {
+    chips.push({
+      label: "Pushed",
+      title: `${plural(address.pushed, "commit")} from Address comments pushed to the PR branch, with nothing left to commit or push`,
+      className: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
+    });
+  }
+  return chips;
+}
+
+function AddressBadges({ card }: { card: BoardCard }) {
+  if (card.address === null || card.address === undefined) return null;
+  return addressChips(card.address).map((chip) => (
+    <span key={chip.label} className={cn("inline-flex shrink-0 items-center rounded px-1 text-[10px] font-semibold tabular-nums", chip.className)} title={chip.title}>
+      {chip.label}
+    </span>
+  ));
 }
 
 function ChecksDot({ checks }: { checks: Checks }) {
@@ -154,6 +186,7 @@ function PullCard({
               {card.title}
             </span>
             <Avatar person={card.author} />
+            <AddressBadges card={card} />
             <AgentBadge card={card} />
           </span>
         ) : (
@@ -208,7 +241,8 @@ function PullCard({
                   {card.unansweredComments}
                 </span>
               ) : null}
-              <span className="ml-auto">
+              <span className="ml-auto inline-flex items-center gap-1.5">
+                <AddressBadges card={card} />
                 <AgentBadge card={card} />
               </span>
             </span>
@@ -418,7 +452,6 @@ export function BoardView() {
   }, [reloadIfVisible]);
 
   const [layout, setLayout] = usePreference<Layout>("board-layout", prefersRows() ? "rows" : "columns", LAYOUT_IDS);
-  const [scope, setScope] = usePreference<Scope>("board-scope", "all", SCOPE_IDS);
   const [query, setQuery] = useState("");
   const [showHidden, setShowHidden] = useState(false);
   const hidden = useStoredSet("hidden-prs");
@@ -433,14 +466,14 @@ export function BoardView() {
   const open = (card: BoardCard) => navigate.toPluginPanel(BOARD_PANEL, { subPath: workspacePath(card) });
 
   const { sections, hiddenCount } = useMemo(() => {
-    const visible = (board.value?.cards ?? []).filter((card) => matches(card, query.trim(), scope));
+    const visible = (board.value?.cards ?? []).filter((card) => matches(card, query.trim()));
     const count = visible.filter((card) => hidden.has(cardKey(card))).length;
     const shown = showHidden ? visible : visible.filter((card) => !hidden.has(cardKey(card)));
     return {
       hiddenCount: count,
       sections: COLUMNS.map((column) => ({ ...column, cards: shown.filter((card) => card.column === column.id) })),
     };
-  }, [board.value, hidden, query, scope, showHidden]);
+  }, [board.value, hidden, query, showHidden]);
 
   if (board.value === null) {
     return board.error === null ? (
@@ -469,7 +502,6 @@ export function BoardView() {
             className="h-8 pl-8 text-sm"
           />
         </div>
-        <Segmented label="Scope" value={scope} options={SCOPES} onChange={setScope} />
         <Segmented label="Layout" value={layout} options={LAYOUTS} onChange={setLayout} />
         {hiddenCount > 0 ? (
           <Button

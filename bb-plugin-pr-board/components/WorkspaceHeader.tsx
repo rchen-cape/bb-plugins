@@ -94,7 +94,7 @@ export function WorkspaceHeader({
             ) : null}
           </div>
         </div>
-        <div className={cn("flex shrink-0 flex-wrap items-center gap-1", narrow && "w-full")}>
+        <div className={cn("ml-auto flex shrink-0 flex-wrap items-center justify-end gap-1", narrow && "w-full")}>
           <ToolbarToggle
             pressed={showDescription}
             label="Description"

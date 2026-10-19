@@ -3,8 +3,9 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFakePluginHost, makePluginAgentConfigurationContext, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
+import { fakeRepo } from "./changes.fixture";
 import type { RunOptions } from "./github";
-import { FINDINGS_TOOL, REVIEW_SKILL, SUGGESTIONS_TOOL, createPlugin, parsePullArgument, reviewMessage, summaryPrompt } from "./server";
+import { FINDINGS_TOOL, RECORD_FIX_TOOL, REVIEW_SKILL, SUGGESTIONS_TOOL, createPlugin, parsePullArgument, reviewMessage, summaryPrompt } from "./server";
 
 const HEAD = "1".repeat(40);
 const BASE = "2".repeat(40);
@@ -28,6 +29,7 @@ const PULL_RESPONSE = {
         headRefName: "thing",
         baseRefName: "main",
         headRefOid: HEAD,
+        updatedAt: "2026-10-02T00:00:00Z",
         baseRefOid: BASE,
         author: { login: "alice", avatarUrl: "https://a" },
         reviewThreads: {
@@ -134,6 +136,10 @@ function fakeRunner(pullResponse: unknown = PULL_RESPONSE, onGraphql?: (variable
       if (variables.ids !== undefined) {
         return JSON.stringify({ data: { nodes: variables.ids.map((id) => board.find((node) => node.id === id) ?? null) } });
       }
+      if (query.includes("OpenPullBranches")) {
+        const pr = (number: number, headRefName: string, baseRefName: string) => ({ number, title: `PR ${number}`, url: "u", headRefName, baseRefName, isCrossRepository: false });
+        return JSON.stringify({ data: { repository: { pullRequests: { nodes: [pr(7, "thing", "main"), pr(8, "thing-2", "thing")] } } } });
+      }
       return JSON.stringify(query.includes("viewerViewedState") ? VIEWED_RESPONSE : pullResponse);
     }
     if (args.includes("--paginate")) {
@@ -151,8 +157,8 @@ function fakeRunner(pullResponse: unknown = PULL_RESPONSE, onGraphql?: (variable
   return { run, calls, board, graphqlVariables };
 }
 
-function setup(now: () => number = Date.now, onGraphql?: Parameters<typeof fakeRunner>[1]) {
-  const runner = fakeRunner(PULL_RESPONSE, onGraphql);
+function setup(now: () => number = Date.now, onGraphql?: Parameters<typeof fakeRunner>[1], pullResponse: unknown = PULL_RESPONSE) {
+  const runner = fakeRunner(pullResponse, onGraphql);
   const thread = makeThreadResponse({ id: "thr_review", environmentId: "env_1", status: "idle", deletedAt: null, archivedAt: null });
   const { bb, harness } = createFakePluginHost({
     pluginId: "pr-board",
@@ -189,6 +195,7 @@ describe("prompts", () => {
       headRefName: "thing",
       baseRefName: "main",
       headSha: HEAD,
+      updatedAt: "2026-10-02T00:00:00Z",
       mergeBaseSha: MERGE_BASE,
       additions: 1,
       deletions: 0,
@@ -495,6 +502,58 @@ describe("findings tool", () => {
   });
 });
 
+describe("pull detail cache", () => {
+  let clock = 0;
+  beforeEach(() => {
+    clock = Date.parse("2026-10-14T12:00:00Z");
+  });
+
+  function counting() {
+    const response = structuredClone(PULL_RESPONSE);
+    const { harness, runner } = setup(() => clock, undefined, response);
+    const count = () => ({
+      full: runner.calls.filter((call) => call.args.includes("--paginate")).length,
+      checks: runner.calls.filter((call) => (call.options.input ?? "").includes("query PullVersion")).length,
+    });
+    const open = () => harness.behavior.callRpc("pull", { repo: "acme/app", number: 7, refresh: false }) as Promise<{ files: Array<{ viewed: boolean }> }>;
+    return { harness, response, count, open };
+  }
+
+  it("reuses an opened PR for 50 seconds, then checks a tiny version before refetching", async () => {
+    const { count, open } = counting();
+    await open();
+    await open();
+    expect(count()).toEqual({ full: 1, checks: 0 });
+    clock += 51_000;
+    await open();
+    expect(count()).toEqual({ full: 1, checks: 1 });
+  });
+
+  it("refetches the PR when its update time, head, or resolved threads change", async () => {
+    const { response, count, open } = counting();
+    await open();
+    clock += 51_000;
+    response.data.repository.pullRequest.reviewThreads.nodes[0]!.isResolved = true;
+    await open();
+    expect(count()).toEqual({ full: 2, checks: 1 });
+    clock += 51_000;
+    response.data.repository.pullRequest.updatedAt = "2026-10-14T12:01:00Z";
+    await open();
+    expect(count()).toEqual({ full: 3, checks: 2 });
+  });
+
+  it("keeps the saved PR when you mark a file viewed, and checks again after you act on the PR", async () => {
+    const { harness, count, open } = counting();
+    await open();
+    await harness.behavior.callRpc("setViewed", { repo: "acme/app", number: 7, pullNodeId: "PR_node", path: "a.go", viewed: true });
+    expect((await open()).files[0]?.viewed).toBe(true);
+    expect(count()).toEqual({ full: 1, checks: 0 });
+    await harness.behavior.callRpc("postConversationComment", { repo: "acme/app", number: 7, body: "Thanks" });
+    await open();
+    expect(count()).toEqual({ full: 1, checks: 1 });
+  });
+});
+
 describe("drafts", () => {
   it("keeps drafts per PR and will not move one to another PR", async () => {
     const { harness } = setup();
@@ -556,13 +615,14 @@ describe("address comments", () => {
   const record = (harness: ReturnType<typeof addressSetup>["harness"], suggestions: unknown[]) =>
     harness.behavior.callAgentTool(SUGGESTIONS_TOOL, { suggestions }, { threadId: "thr_address" });
 
-  it("starts an address thread that gets only the suggestions tool, then re-sends the comments to it", async () => {
+  it("starts an address thread that gets only the suggestions and fix tools, then re-sends the comments to it", async () => {
     const { harness, runner } = addressSetup();
     const first = await harness.behavior.callRpc("addressComments", { repo: "acme/app", number: 7 });
     expect(first).toEqual({ threadId: "thr_address", created: true, delivery: "queued" });
     const [spawn] = harness.inspection.sdk.callsTo("threads.spawn");
     expect(spawn?.[0]).toMatchObject({ pluginMetadata: { repo: "acme/app", number: 7, kind: "address" } });
     expect(JSON.stringify(spawn?.[0])).toContain("[PRRT_1] a.go line 2");
+    expect(JSON.stringify(spawn?.[0])).toContain("#8 thing-2 into thing");
     await vi.waitFor(() => expect(harness.inspection.sdk.callsTo("threads.send")).toHaveLength(1));
     expect(runner.calls.find((call) => call.args[0] === "pr" && call.args[1] === "checkout")?.options.cwd).toBe(worktree);
     expect(JSON.stringify(harness.inspection.sdk.callsTo("threads.send")[0]?.[0])).toContain(SUGGESTIONS_TOOL);
@@ -575,7 +635,7 @@ describe("address comments", () => {
     const address = await harness.behavior.resolveAgentConfiguration(
       makePluginAgentConfigurationContext({ pluginMetadata: { repo: "acme/app", number: 7, kind: "address" } }),
     );
-    expect(address.tools.map((tool) => tool.name)).toEqual([SUGGESTIONS_TOOL]);
+    expect(address.tools.map((tool) => tool.name).sort()).toEqual([RECORD_FIX_TOOL, SUGGESTIONS_TOOL]);
   });
 
   it("starts no thread when every comment's last reply is mine", async () => {
@@ -741,5 +801,151 @@ describe("address comments", () => {
     await harness.behavior.callRpc("postConversationComment", { repo: "acme/app", number: 7, body: "Thanks!" });
     const post = runner.calls.find((call) => String(call.args[3]).endsWith("/issues/7/comments"));
     expect(post?.options.input).toBe(JSON.stringify({ body: "Thanks!" }));
+  });
+});
+
+describe("address changes", () => {
+  let worktree: string;
+  beforeEach(async () => {
+    worktree = await mkdtemp(join(tmpdir(), "pr-board-changes-"));
+    await writeFile(join(worktree, "a.go"), "package a\n\nfunc b() {}\n");
+  });
+  afterEach(async () => {
+    await rm(worktree, { recursive: true, force: true });
+  });
+
+  function changesSetup() {
+    const runner = fakeRunner();
+    const repo = fakeRepo(HEAD);
+    const run = vi.fn(async (command: string, args: readonly string[], options: RunOptions) =>
+      command === "git" ? repo.git(args, options.okExitCodes) : runner.run(command, args, options),
+    );
+    const thread = makeThreadResponse({ id: "thr_address", environmentId: "env_1", status: "idle", deletedAt: null, archivedAt: null });
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "pr-board",
+      agentSkillIds: ["pr-board"],
+      settings: { repos: "acme/app" },
+      sdk: {
+        projects: { list: async () => [{ id: "proj_app", gitRemoteUrl: "git@github.com:acme/app.git" }] as never },
+        system: { config: async () => ({ primaryHostId: "host_1" }) as never },
+        threads: { spawn: async () => thread as never, get: async () => thread as never, send: async () => ({ delivery: "queued" }) as never },
+        environments: { get: async () => ({ id: "env_1", status: "ready", path: worktree, hostId: "host_1" }) as never },
+      },
+    });
+    createPlugin({ run, pollMs: 1, now: Date.now })(bb);
+    const changes = (number = 7) =>
+      harness.behavior.callRpc("addressChanges", { repo: "acme/app", number, refresh: true }) as Promise<{
+        available: boolean;
+        uncommitted: Array<{ path: string; commentIds: string[] }>;
+        unpushed: Array<{ sha: string; commentIds: string[] }>;
+        pushed: Array<{ sha: string; commentIds: string[] }>;
+        comments: Array<{ commentId: string; state: string; sha: string | null; sources: string[]; files: string[] }>;
+      }>;
+    const recordFix = (fixes: unknown[], threadId = "thr_address") => harness.behavior.callAgentTool(RECORD_FIX_TOOL, { fixes }, { threadId });
+    return { harness, repo, changes, recordFix };
+  }
+
+  async function started() {
+    const context = changesSetup();
+    await context.harness.behavior.callRpc("addressComments", { repo: "acme/app", number: 7 });
+    await vi.waitFor(() => expect(context.harness.inspection.sdk.callsTo("threads.send")).toHaveLength(1));
+    return context;
+  }
+
+  it("links an accepted suggestion to its comment and follows it from uncommitted to committed and pushed", async () => {
+    const { harness, repo, changes } = await started();
+    await harness.behavior.callAgentTool(
+      SUGGESTIONS_TOOL,
+      { suggestions: [{ commentId: "PRRT_1", summary: "Rename b to c", changes: [{ path: "a.go", find: "func b() {}", replace: "func c() {}" }] }] },
+      { threadId: "thr_address" },
+    );
+    const state = (await harness.behavior.callRpc("reviewState", { repo: "acme/app", number: 7 })) as { suggestions: Array<{ id: string }> };
+    await harness.behavior.callRpc("applySuggestion", { id: state.suggestions[0]!.id });
+
+    repo.state.status = " M a.go\0";
+    const dirty = await changes();
+    expect(dirty.uncommitted).toEqual([expect.objectContaining({ path: "a.go", commentIds: ["PRRT_1"] })]);
+    expect(dirty.comments).toEqual([{ commentId: "PRRT_1", state: "uncommitted", files: ["a.go"], sha: null, sources: ["suggestion"] }]);
+
+    repo.state.status = "";
+    const sha = repo.commit("Rename b to c", ["M\ta.go"]);
+    expect((await changes()).comments[0]).toMatchObject({ state: "committed", sha });
+    repo.push();
+    const pushed = await changes();
+    expect(pushed.pushed).toEqual([expect.objectContaining({ sha, commentIds: ["PRRT_1"] })]);
+    expect(pushed.comments[0]).toMatchObject({ state: "pushed", sha });
+
+    const result = await harness.behavior.runCli(["changes", "7"]);
+    expect(result.stdout).toBe(
+      ["Uncommitted (0)", "Committed, not pushed (0)", "Pushed (1)", `  ${sha.slice(0, 7)}\tRename b to c\taddresses PRRT_1`, "    M\ta.go", ""].join("\n"),
+    );
+  });
+
+  it("records fixes the address thread made on request and refuses other threads, unknown comments, and unchanged files", async () => {
+    const { repo, changes, recordFix } = await started();
+    repo.state.status = " M a.go\0";
+    const review = setup();
+    await review.harness.behavior.callRpc("openReview", { repo: "acme/app", number: 7 });
+    const wrongThread = await review.harness.behavior.callAgentTool(
+      RECORD_FIX_TOOL,
+      { fixes: [{ commentId: "PRRT_1", files: ["a.go"], summary: "Rename" }] },
+      { threadId: "thr_review" },
+    );
+    expect(JSON.stringify(wrongThread)).toContain("not a PR Board address-comments thread");
+
+    const refused = await recordFix([
+      { commentId: "PRRT_other", files: ["a.go"], summary: "Rename" },
+      { commentId: "IC_1", files: ["b.go"], summary: "Add test" },
+    ]);
+    expect(refused).toMatchObject({ isError: true });
+    expect(JSON.stringify(refused)).toContain("no code comment thread or conversation comment with that id");
+    expect(JSON.stringify(refused)).toContain("b.go has no uncommitted change");
+    expect((await changes()).comments).toEqual([]);
+
+    expect(await recordFix([{ commentId: "IC_1", files: [`${worktree}/a.go`], summary: "Add test" }])).toContain("Linked 1 fix");
+    expect((await changes()).comments).toEqual([{ commentId: "IC_1", state: "uncommitted", files: ["a.go"], sha: null, sources: ["thread"] }]);
+
+    repo.state.status = "";
+    const sha = repo.commit("Add docs", ["A\tdocs.md"]);
+    expect(await recordFix([{ commentId: "PRRT_1", files: ["docs.md"], summary: "Docs" }])).toContain("Linked 1 fix");
+    expect((await changes()).comments.find((comment) => comment.commentId === "PRRT_1")).toMatchObject({ state: "committed", sha, sources: ["thread"] });
+  });
+
+  it("refuses diffs of paths and commits that are not in the change lists", async () => {
+    const { harness, repo } = await started();
+    repo.state.status = "?? new.md\0";
+    const sha = repo.commit("Rename", ["M\ta.go"]);
+    const diff = (path: string, commit: string | null) => harness.behavior.callRpc("addressDiff", { repo: "acme/app", number: 7, path, sha: commit });
+    await expect(diff("secret.txt", null)).rejects.toThrow("no uncommitted change");
+    await expect(diff("a.go", "9".repeat(40))).rejects.toThrow("not one of the address thread's commits");
+    expect(await diff("new.md", null)).toEqual({ patch: expect.stringContaining("--no-index -- /dev/null new.md") });
+    expect(await diff("a.go", sha)).toEqual({ patch: expect.stringContaining(`show --no-ext-diff -M --format= ${sha} -- a.go`) });
+  });
+
+  it("shows address counts on the cards of PRs with an address thread and never fails the board", async () => {
+    const { harness, repo } = changesSetup();
+    await harness.behavior.callRpc("addressComments", { repo: "acme/app", number: 1 });
+    repo.state.status = " M a.go\0";
+    repo.commit("Rename", ["M\ta.go"]);
+    const board = async () =>
+      ((await harness.behavior.callRpc("board", { refresh: true })) as { cards: Array<{ number: number; address: unknown }> }).cards.map((card) => [card.number, card.address]);
+    expect(await board()).toEqual([
+      [6, null],
+      [5, null],
+      [3, null],
+      [2, null],
+      [1, { uncommitted: 1, unpushed: 1, pushed: 0 }],
+    ]);
+    repo.state.fail = true;
+    await harness.behavior.callRpc("postConversationComment", { repo: "acme/app", number: 1, body: "Thanks" });
+    expect((await board()).find(([number]) => number === 1)).toEqual([1, null]);
+  });
+
+  it("publishes an update when the address thread goes idle", async () => {
+    const { harness } = await started();
+    const before = harness.inspection.realtimeSignals.length;
+    await harness.behavior.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: "thr_address" }), lastAssistantText: null });
+    await harness.behavior.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: "thr_other" }), lastAssistantText: null });
+    expect(harness.inspection.realtimeSignals.slice(before)).toHaveLength(1);
   });
 });

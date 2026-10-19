@@ -34,6 +34,13 @@ const agentSchema = z.object({
 });
 export type AgentState = z.infer<typeof agentSchema>;
 
+const addressCountsSchema = z.object({
+  uncommitted: z.number().int().nonnegative(),
+  unpushed: z.number().int().nonnegative(),
+  pushed: z.number().int().nonnegative(),
+});
+export type AddressCounts = z.infer<typeof addressCountsSchema>;
+
 export const boardCardSchema = z.object({
   repo: repoSchema,
   number: prNumberSchema,
@@ -58,6 +65,7 @@ export const boardCardSchema = z.object({
   isRequested: z.boolean(),
   isAwaitingReply: z.boolean(),
   agent: agentSchema,
+  address: addressCountsSchema.nullable(),
 });
 export type BoardCard = z.infer<typeof boardCardSchema>;
 
@@ -118,7 +126,7 @@ export const reviewThreadSchema = z.object({
 });
 export type ReviewThread = z.infer<typeof reviewThreadSchema>;
 
-const pullDetailSchema = z.object({
+export const pullDetailSchema = z.object({
   repo: repoSchema,
   number: prNumberSchema,
   nodeId: z.string(),
@@ -132,6 +140,7 @@ const pullDetailSchema = z.object({
   headRefName: z.string(),
   baseRefName: z.string(),
   headSha: shaSchema,
+  updatedAt: z.string(),
   mergeBaseSha: shaSchema,
   additions: z.number().int(),
   deletions: z.number().int(),
@@ -204,6 +213,48 @@ const reviewStateSchema = z.object({
   suggestions: z.array(suggestionSchema),
 });
 export type ReviewState = z.infer<typeof reviewStateSchema>;
+
+export const changeLetterSchema = z.enum(["M", "A", "D", "R", "U"]);
+export type ChangeLetter = z.infer<typeof changeLetterSchema>;
+
+export const fixStateSchema = z.enum(["uncommitted", "committed", "pushed", "none"]);
+export type FixState = z.infer<typeof fixStateSchema>;
+
+export const fixSourceSchema = z.enum(["suggestion", "thread"]);
+export type FixSource = z.infer<typeof fixSourceSchema>;
+
+const changedFileSchema = z.object({ path: z.string(), previousPath: z.string().nullable(), status: changeLetterSchema });
+export type ChangedFile = z.infer<typeof changedFileSchema>;
+
+const addressCommitSchema = z.object({
+  sha: z.string(),
+  shortSha: z.string(),
+  subject: z.string(),
+  files: z.array(changedFileSchema),
+  commentIds: z.array(z.string()),
+});
+export type AddressCommit = z.infer<typeof addressCommitSchema>;
+
+const commentFixStatusSchema = z.object({
+  commentId: z.string(),
+  state: fixStateSchema,
+  files: z.array(z.string()),
+  sha: z.string().nullable(),
+  sources: z.array(fixSourceSchema),
+});
+export type CommentFixStatus = z.infer<typeof commentFixStatusSchema>;
+
+const addressChangesSchema = z.object({
+  available: z.boolean(),
+  reason: z.string().nullable(),
+  head: z.string().nullable(),
+  upstream: z.string().nullable(),
+  uncommitted: z.array(changedFileSchema.extend({ commentIds: z.array(z.string()) })),
+  unpushed: z.array(addressCommitSchema),
+  pushed: z.array(addressCommitSchema),
+  comments: z.array(commentFixStatusSchema),
+});
+export type AddressChanges = z.infer<typeof addressChangesSchema>;
 
 const definitionSchema = z.object({
   path: z.string(),
@@ -349,5 +400,13 @@ export const rpcContract = defineRpcContract({
   postConversationComment: {
     input: z.object({ ...pullRef, body: bodySchema }).strict(),
     output: empty,
+  },
+  addressChanges: {
+    input: z.object({ ...pullRef, refresh: z.boolean().optional() }).strict(),
+    output: addressChangesSchema,
+  },
+  addressDiff: {
+    input: z.object({ ...pullRef, path: pathSchema, sha: shaSchema.nullable() }).strict(),
+    output: z.object({ patch: z.string() }),
   },
 });

@@ -20,7 +20,7 @@ repository `gh` can see:
 
 - PRs you opened;
 - PRs that involve you without you having commented on or reviewed them, such
-  as ones that @-mention you (the **Mentioned** filter);
+  as ones that @-mention you;
 - PRs where someone requested your review directly (team requests do not count);
 - PRs you commented on or reviewed where your comment is still the latest, in
   an unresolved review thread or the conversation, so it waits for a reply.
@@ -42,14 +42,17 @@ Each card shows the repository name (unless the board is limited to one
 repository), number, title, author, age, size, CI status, reviewers
 (ring color: green approved, red changes requested, blue commented, grey
 requested), comment count, unresolved threads, comments waiting for your
-reply (red warning sign), and the review thread's state. A comment waits for
+reply (red warning sign), the review thread's state, and, for PRs with an
+address thread, its worktree's changes: **N uncommitted** (amber, changed
+files), **N to push** (commits not pushed yet), or **Pushed** (green, when
+everything from Address comments is pushed). A comment waits for
 your reply when it is an unresolved code comment whose latest reply is not
 yours, or a conversation comment or review with text posted after your latest
 comment, review with text, approval, change request, or dismissed review.
 Approvals and dismissed reviews do not wait for a reply. On PRs you did not open, only code comments you replied in and
 conversations you posted in count. Comments from bots, GitHub Actions, and
 Copilot do not count.
-Filter by text, or by **Mine**, **Requested**, **Mentioned**, and **Awaiting reply**.
+Filter by text with the search box.
 
 **Columns** lays the groups out side by side; **Rows** stacks them, each a grid
 of cards that wraps to the page width, so the page scrolls down. Rows is the
@@ -103,7 +106,20 @@ address thread's chat is the **Address thread** tab beside it. The
 thread.
 
 A PR's page also opens from the cache when you come back to it, on the file
-you last viewed, and refreshes in the background.
+you last viewed, and refreshes in the background. The server keeps each PR it
+has loaded in the plugin database, so this survives restarts, and only fetches
+it again when it changed:
+
+- Within 50 seconds of the last look it reuses the saved PR with no GitHub
+  call.
+- After that it runs one tiny query (last update time, head commit, and which
+  review threads are resolved) and reuses the saved PR when nothing changed. If
+  the board checked the PR in the last 50 seconds and it has not been updated,
+  it skips even that.
+- Only a change, a PR Board action on the PR, or the page's refresh fetches the
+  PR, its files, viewed states, and merge base again. Marking a file viewed in
+  PR Board updates the saved PR; marking it on GitHub's website is not noticed
+  until the PR changes.
 
 The page has:
 
@@ -124,6 +140,8 @@ The page has:
   threads, and pending comments render under their last line. Findings on
   lines outside the shown hunks, and outdated GitHub comments, are listed
   above the diff.
+- **Changes** (once the PR has an address thread): see
+  [Tracking fixes](#tracking-fixes).
 - **Description**: the PR body.
 - **Run review**: starts the review thread, or sends the review command to it again.
 - **Address comments** (under Run review) and **Submit Address** (under Submit
@@ -138,14 +156,27 @@ the same rule as the board's red count: unresolved code comments where someone
 else replied last, and conversation comments or reviews with text from others
 posted after your last conversation reply (bots skipped). It asks for a short
 summary, and then, once the checkout is done, a suggestion per listed comment.
-When no comment is waiting for your reply, it says so and starts nothing. Clicking it
+When no comment is waiting for your reply, it says so and starts nothing.
+
+If the PR is part of a stack (open PRs in the same repository whose branches build
+on each other), the thread is told the whole stack, bottom first, found with one
+query of the repository's open PRs (about 1 API point per click). Before suggesting
+a change, it checks the PRs above with `git` (no API calls): if one already makes
+the change, it suggests only a reply such as "Addressed in #123". If the code a
+comment is about comes from a PR below, it says the fix belongs there and suggests
+only a reply.
+
+Clicking it
 again reloads the PR, moves the thread's worktree to the PR's latest commit
 with `git pull --ff-only` (keeping accepted changes), and sends the current
 comments to the same thread; its new suggestions replace the old ones. If the
 worktree cannot fast-forward, for example because an accepted change conflicts
 with the new commits, nothing is sent and git's error is shown.
 
-The thread does not edit files. It records suggestions with the
+By default the thread does not edit files. If you ask it in the thread to fix
+a specific comment itself, it edits the worktree and links the change to that
+comment with the `pr_board_record_fix` tool (see
+[Tracking fixes](#tracking-fixes)). It records suggestions with the
 `pr_board_record_suggestions` tool, and each suggestion can hold:
 
 - **A change**: edits that each replace one exact piece of a file (or create a
@@ -160,6 +191,41 @@ The thread does not edit files. It records suggestions with the
   comments, posted as a new PR comment).
 
 Each change and reply can be dismissed, and **Show dismissed** brings them back.
+
+### Tracking fixes
+
+PR Board links each change in the address thread's worktree to the comment it
+addresses, in two ways:
+
+- **Accept change** records the suggestion's files for its comment.
+- When you ask the address thread to fix a comment, it calls
+  `pr_board_record_fix` with the comment id and the files it changed. The tool
+  refuses comment ids that are not on the PR and files that have no change in
+  the worktree or in a commit made there since the thread started, so the
+  agent fixes the call and tries again.
+
+The **Changes** tab, beside Comments, works like VS Code's Source Control view
+for the address thread's worktree:
+
+- **Uncommitted**: changed files with a status letter (`M` modified, `A`
+  added, `D` deleted, `R` renamed, `U` untracked).
+- **Committed, not pushed**: commits made in the worktree that are not on the
+  PR branch's upstream yet. Click one to list its files.
+- **Pushed**: commits made in the worktree that are on the upstream.
+
+Commits made elsewhere, such as a teammate's commits pulled into the worktree,
+are left out: only commits the worktree's reflog shows were made there count.
+Each file or commit shows the comments it addresses; click one to jump to that
+comment. Click a file to see its diff. The tab updates when PR Board or the
+address thread changes something, when the thread finishes a turn, every 10
+seconds while it works, and from its refresh button.
+
+Each comment with a linked fix shows **Uncommitted fix**, **Committed abc1234 ·
+not pushed**, or **Pushed abc1234**. Hover it for the files and whether the fix
+came from an accepted suggestion or from asking in the address thread. A fix
+counts as committed in the first commit after it that touches its files, and
+shows nothing once its files have neither a change nor such a commit (for
+example after you discard it).
 
 **Submit Address** asks you to confirm, then sends the address thread one
 message. It runs the check, lint, typecheck, build, and test steps of the
@@ -248,14 +314,17 @@ bb pr-board findings <n | owner/repo#n | PR URL> [--json]
 bb pr-board address <n | owner/repo#n | PR URL> [--json]
 bb pr-board submit-address <n | owner/repo#n | PR URL> [--json]
 bb pr-board suggestions <n | owner/repo#n | PR URL> [--json]
+bb pr-board changes <n | owner/repo#n | PR URL> [--json]
 ```
 
 See `skills/pr-board/SKILL.md` for the output formats.
 
 ## Storage
 
-The plugin database keeps the PR of each review and address thread, the
-findings, the comment suggestions, and pending comments. Accepted changes go
+The plugin database keeps the PR of each review and address thread (with the
+commit the address thread started from), the findings, the comment
+suggestions, the fixes linked to comments, and pending comments. Commit and
+push state is read from the worktree with `git`, not stored. Accepted changes go
 only to the address thread's worktree. Nothing reaches GitHub until you post a comment, reply,
 resolve a thread, mark a file viewed, or submit a review.
 
