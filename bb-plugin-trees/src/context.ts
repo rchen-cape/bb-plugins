@@ -97,7 +97,7 @@ export function assembleContext(args: AssembleContextArgs): string {
     blocks.push(
       [
         "## Deliverable",
-        `Work in this thread as long as you need. When the work is finished, post the deliverable itself as your final message — Trees saves that message verbatim to \`${args.artifactFile}\` and passes it to the tasks that depend on this one. Do not end with a status report about the work; end with the work.`,
+        `Work in this thread as long as you need. When the work is finished, post the deliverable itself as your final message — Project Trees saves that message verbatim to \`${args.artifactFile}\` and passes it to the tasks that depend on this one. Do not end with a status report about the work; end with the work.`,
       ].join("\n\n"),
     );
   }

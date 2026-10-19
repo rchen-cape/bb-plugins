@@ -7,7 +7,7 @@ import { getNode, insertProject, migrations, type Db } from "./data";
  * The hash of every statement that has shipped. bb records these the first
  * time a statement runs and refuses to load the plugin when one of them
  * changes, so editing a released statement rather than appending a new one
- * bricks Trees for everyone who already has a tree. Append here alongside a
+ * bricks Project Trees for everyone who already has a tree. Append here alongside a
  * new migration; never edit a line above.
  */
 const SHIPPED_HASHES = [

@@ -123,11 +123,11 @@ function baseRpc(overrides: Record<string, (input: never) => unknown> = {}) {
   };
 }
 
-describe("Trees panel", () => {
+describe("Project Trees panel", () => {
   it("registers one full-page panel in the sidebar", () => {
     expect(app.navPanels).toHaveLength(1);
     expect(panel.id).toBe("trees");
-    expect(panel.title).toBe("Trees");
+    expect(panel.title).toBe("Project Trees");
     expect(panel.path).toBe("trees");
   });
 
@@ -804,7 +804,7 @@ describe("Trees panel", () => {
         },
       ]);
     });
-    // The thread opens in the background; Trees keeps the canvas and panel.
+    // The thread opens in the background; Project Trees keeps the canvas and panel.
     expect(
       slot.inspection.navigateCalls.filter(
         (call) => call.method === "toThread",
@@ -812,7 +812,7 @@ describe("Trees panel", () => {
     ).toEqual([]);
   });
 
-  it("does not leave Trees when a task is created", async () => {
+  it("does not leave Project Trees when a task is created", async () => {
     const slot = renderSlot(panel, { subPath: project.id }, { rpc: baseRpc() });
     await slot.findByText("Write auth requirements");
 
@@ -1370,7 +1370,7 @@ describe("Trees panel", () => {
     expect(slot.queryByRole("button", { name: "New task" })).toBeNull();
   });
 
-  it("names the open tree in the title bar breadcrumb, without repeating Trees", async () => {
+  it("names the open tree in the title bar breadcrumb, without repeating Project Trees", async () => {
     const slot = renderSlot(
       breadcrumb,
       { subPath: project.id },
@@ -1380,7 +1380,7 @@ describe("Trees panel", () => {
     await slot.findByText(project.name);
     await slot.findByText("2 tasks ·");
     await slot.findByRole("button", { name: "1 ready" });
-    expect(slot.queryByText("Trees")).toBeNull();
+    expect(slot.queryByText("Project Trees")).toBeNull();
   });
 
   it("keeps the title bar clear on the tree index", async () => {
@@ -1414,7 +1414,7 @@ describe("Trees panel", () => {
 
   /*
    * A tree's ready list belongs under the tree, so leaving it lands on that
-   * tree's canvas and only Trees goes back to every tree.
+   * tree's canvas and only Project Trees goes back to every tree.
    */
   it("keeps a tree's ready list inside the tree, entered by its count", async () => {
     const crumb = renderSlot(

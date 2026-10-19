@@ -1,6 +1,6 @@
-# Trees
+# Project Trees
 
-Trees is a to-do list shaped like a dependency graph. A project is a directed
+Project Trees is a to-do list shaped like a dependency graph. A project is a directed
 acyclic graph of atomic tasks: each task waits for the tasks it depends on, and
 each finished task passes its compacted output down to the tasks that depend on
 it.
@@ -15,17 +15,17 @@ npm install --include=dev
 bb plugin install . --yes
 ```
 
-That adds the Trees panel, the `bb tree` command, and the `trees` agent skill.
+That adds the Project Trees panel, the `bb tree` command, and the `trees` agent skill.
 
-Trees needs a bb built from the rchen-cape/bb fork. Its panel registers
+Project Trees needs a bb built from the rchen-cape/bb fork. Its panel registers
 `experimental_headerBreadcrumb`, which only the fork's plugin SDK accepts; stock
 bb installs the plugin and runs `bb tree`, but refuses to load the panel with
 `navPanel: unknown field "experimental_headerBreadcrumb"`.
 
-Trees keeps the plugin id `trees` it had when bb bundled it, so its graph in
+Project Trees keeps the plugin id `trees` it had when bb bundled it, so its graph in
 `<data dir>/plugins/trees/data.db` carries over. A bb build that still bundles
-Trees refuses this install; on a build without it, bb drops the old bundled
-install at startup along with its settings, so set **Trees folder** again if
+Project Trees refuses this install; on a build without it, bb drops the old bundled
+install at startup along with its settings, so set **Project Trees folder** again if
 you had changed it.
 
 ## Develop
@@ -59,7 +59,7 @@ leaves a lockfile checksum that fails the next clean install.
 
 ## Where the files live
 
-Set **Trees folder** in the plugin's settings (default `~/Trees`). Each tree
+Set **Project Trees folder** in the plugin's settings (default `~/Trees`). Each tree
 becomes a subdirectory of it, and each task owns one Markdown file inside that
 subdirectory:
 
@@ -71,13 +71,13 @@ subdirectory:
 ```
 
 The graph itself — tasks, dependencies, states, and summaries — lives in the
-plugin's own database, not in that folder. Deleting a project from Trees leaves
+plugin's own database, not in that folder. Deleting a project from Project Trees leaves
 its Markdown files untouched.
 
 Tree folders resolve on the primary machine, so `~` expands to the home
 directory of the account running the BB server.
 
-**A tree belongs to no project.** Its Markdown lives in the Trees folder, and
+**A tree belongs to no project.** Its Markdown lives in the Project Trees folder, and
 which repository gets changed is each agent task's own business: every agent
 task names the project it works in and the branch to cut its worktree from. One
 tree can therefore change several codebases — a schema in one repository, the
@@ -115,17 +115,17 @@ bb tree start "Generate API design specs"
 
 ## The task panel
 
-Trees keeps one header line: `Trees > <tree name>` with the task counts, and
+Project Trees keeps one header line: `Project Trees > <tree name>` with the task counts, and
 the tree's actions — Tidy layout, Delete tree — at the far right. Click
-**Trees** to go back to every tree.
+**Project Trees** to go back to every tree.
 
 The counts are the navigation. Clicking **N ready** opens that tree's ready
 list, so there is no separate button for it; the count stays visible on a narrow
 window even when the task count does not, so the list is always reachable.
 
 The trail nests, so each segment is the way back to what it names. A tree's
-ready list reads `Trees > <tree name> > What's ready` and lists only that tree's
-ready tasks; the tree name returns to its canvas, and Trees returns to every
+ready list reads `Project Trees > <tree name> > What's ready` and lists only that tree's
+ready tasks; the tree name returns to its canvas, and Project Trees returns to every
 tree. The **What's ready** button on the tree index is the one that spans every
 tree, which is what `bb tree ready` prints — add `--project <tree>` for one
 tree's.
@@ -307,7 +307,7 @@ sends it: a thread starting, `bb tree resend`, and **Send down the context** to
 a child already working. An agent task receives the pictures themselves, as
 attachments of its own message, not paths to go and read — an image is copied
 into the thread's project as bb does for anything you attach in the composer,
-because a path into the Trees folder is something the agent's runtime may have
+because a path into the Project Trees folder is something the agent's runtime may have
 no way to open.
 
 In the document that travels, each reference becomes a numbered marker —
@@ -367,7 +367,7 @@ retry with `bb tree compact <task>`. Downstream tasks see
 
 A completed task goes stale when what it was completed against changes: an
 upstream summary or output changed, an upstream task is itself stale, or the
-task's own instruction changed. Trees flags it and never reruns anything by
+task's own instruction changed. Project Trees flags it and never reruns anything by
 itself:
 
 - `bb tree reopen <task>` moves it back to ready so you can redo it against the

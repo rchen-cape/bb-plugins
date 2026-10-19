@@ -115,7 +115,7 @@ function buildSdk(fakes: Fakes) {
     },
     projects: {
       attachments: {
-        // Typed as the SDK's own union, which is wider than Trees ever sends.
+        // Typed as the SDK's own union, which is wider than Project Trees ever sends.
         upload: async (args: {
           projectId: string;
           clientFile: unknown;
@@ -670,10 +670,10 @@ describe("trees service", () => {
   });
 
   /*
-   * A tree belongs to no project: its files live in the Trees folder, and
+   * A tree belongs to no project: its files live in the Project Trees folder, and
    * which repository gets changed is each agent task's own business.
    */
-  it("keeps a tree's files in the Trees folder and names no project", async () => {
+  it("keeps a tree's files in the Project Trees folder and names no project", async () => {
     const { call } = await loadPlugin(fakes);
     const created = (await call("projects_create", {
       name: "Auth",
@@ -1376,7 +1376,7 @@ describe("trees service", () => {
         fileName: "diagram.svg",
         contentBase64: png,
       }),
-    ).rejects.toThrow(/not an image Trees can store/u);
+    ).rejects.toThrow(/not an image Project Trees can store/u);
     await expect(
       call("image_attach", {
         nodeId: note.id,
@@ -1427,7 +1427,7 @@ describe("trees service", () => {
     await call("node_start", { nodeId: child.id });
     /*
      * Uploaded as an attachment of the thread's project: a path into the
-     * Trees folder is handed to the agent's runtime to read, which it may
+     * Project Trees folder is handed to the agent's runtime to read, which it may
      * not be able to do, and then the picture never arrives.
      */
     expect(fakes.uploads).toEqual([

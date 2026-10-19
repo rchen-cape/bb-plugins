@@ -95,11 +95,11 @@ export default function plugin(bb: BbPluginApi) {
   const settings = bb.settings.define({
     rootDirectory: {
       type: "string",
-      label: "Trees folder",
+      label: "Project Trees folder",
       default: DEFAULT_ROOT_DIRECTORY,
       experimental_schema: z
         .string()
-        .min(1, "A Trees folder path is required")
+        .min(1, "A Project Trees folder path is required")
         .max(1024, "That path is too long"),
     },
   });
@@ -175,7 +175,7 @@ export default function plugin(bb: BbPluginApi) {
       service.clearThread(thread.id);
     } catch (error) {
       bb.log.warn(
-        `Trees could not detach the deleted thread ${thread.id}: ${errorText(error)}`,
+        `Project Trees could not detach the deleted thread ${thread.id}: ${errorText(error)}`,
       );
     }
   });
@@ -187,7 +187,7 @@ export default function plugin(bb: BbPluginApi) {
           await service.runPendingSummaries();
         } catch (error) {
           bb.log.warn(
-            `Trees could not run a queued summary: ${errorText(error)}`,
+            `Project Trees could not run a queued summary: ${errorText(error)}`,
           );
         }
         await sleep(SUMMARY_POLL_INTERVAL_MS, signal);
@@ -202,7 +202,7 @@ export default function plugin(bb: BbPluginApi) {
           await service.reconcileArtifacts();
         } catch (error) {
           bb.log.warn(
-            `Trees could not reconcile task files: ${errorText(error)}`,
+            `Project Trees could not reconcile task files: ${errorText(error)}`,
           );
         }
         await sleep(RECONCILE_INTERVAL_MS, signal);

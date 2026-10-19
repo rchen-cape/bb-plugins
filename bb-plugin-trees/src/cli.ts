@@ -486,7 +486,7 @@ export function createTreeCli(deps: TreeCliDeps) {
       return result({
         json,
         payload: { ok: true, deleted: project.id },
-        text: `Removed ${project.name} from Trees. Its Markdown files are still in ${project.directory}.`,
+        text: `Removed ${project.name} from Project Trees. Its Markdown files are still in ${project.directory}.`,
       });
     }
     throw new CliUsageError(`Unknown project action "${action}".`);

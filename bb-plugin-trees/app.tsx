@@ -150,7 +150,7 @@ function ProjectIndex({
     <div className="h-full overflow-y-auto p-4 md:p-5">
       <div className="mx-auto w-full max-w-3xl space-y-4">
         <p className="text-sm text-muted-foreground">
-          A tree keeps its Markdown in the Trees folder. It belongs to no
+          A tree keeps its Markdown in the Project Trees folder. It belongs to no
           project: each agent task picks the project and branch it works in, so
           one tree can change several repositories.
         </p>
@@ -311,7 +311,7 @@ function TreesHeader({ subPath }: PluginNavPanelProps) {
         onClick={() => {
           if (
             !window.confirm(
-              "Remove this tree from Trees? Its Markdown files stay on disk.",
+              "Remove this tree from Project Trees? Its Markdown files stay on disk.",
             )
           ) {
             return;
@@ -367,7 +367,7 @@ function TreesBreadcrumb({ subPath }: PluginNavPanelProps) {
         </span>
       ) : insideTree ? (
         <>
-          {/* The tree is the way back to its canvas; Trees goes to all of them. */}
+          {/* The tree is the way back to its canvas; Project Trees goes to all of them. */}
           <button
             type="button"
             className="shrink-0 truncate text-sm font-semibold text-muted-foreground hover:text-foreground hover:underline"
@@ -957,7 +957,7 @@ function TreesPanel({ subPath }: PluginNavPanelProps) {
 export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "trees",
-    title: "Trees",
+    title: "Project Trees",
     icon: "Workflow",
     path: PANEL_PATH,
     component: TreesPanel,

@@ -37,11 +37,11 @@ export function resolveRootDirectory(args: {
 }): string {
   const expanded = expandHomePath(args.rawPath.trim(), args.homeDirectory);
   if (expanded.length === 0) {
-    throw new Error("A Trees folder path is required.");
+    throw new Error("A Project Trees folder path is required.");
   }
   if (!path.isAbsolute(expanded)) {
     throw new Error(
-      `The Trees folder must be an absolute path or start with "~/", received "${args.rawPath}".`,
+      `The Project Trees folder must be an absolute path or start with "~/", received "${args.rawPath}".`,
     );
   }
   const normalized = path.normalize(expanded);

@@ -13,7 +13,7 @@
     "bbPluginSdk": ">=0.4.84"
   },
   "bb": {
-    "name": "Trees",
+    "name": "Project Trees",
     "description": "Organize work as a dependency graph of atomic tasks, and pass each finished task's context down to the ones that depend on it.",
     "branding": {
       "icon": "Workflow"

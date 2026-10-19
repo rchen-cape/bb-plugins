@@ -1,11 +1,11 @@
 ---
 name: trees
-description: Work with Trees, BB's dependency-graph to-do list. Use when a request mentions a tree, a tree task, `bb tree`, node dependencies that gate each other, or when this thread was started by a Trees task and needs to know how its output is saved.
+description: Work with Project Trees, BB's dependency-graph to-do list. Use when a request mentions a tree, a tree task, `bb tree`, node dependencies that gate each other, or when this thread was started by a Project Trees task and needs to know how its output is saved.
 ---
 
-# Trees
+# Project Trees
 
-Trees keeps a project as a directed acyclic graph of atomic tasks. A task is
+Project Trees keeps a project as a directed acyclic graph of atomic tasks. A task is
 either a **note** you write as Markdown or an **agent task** that runs in its
 own BB thread. A task becomes ready only when every task it depends on is
 completed, and each completed task passes a compacted summary down to the tasks
@@ -18,12 +18,12 @@ and title, such as `02_tech_spec.md`.
 
 The first message you received is the task's assembled context: the upstream
 summaries, the instruction, and the deliverable contract. When the work is
-done, **post the deliverable itself as your final message**. Trees writes that
+done, **post the deliverable itself as your final message**. Project Trees writes that
 message verbatim into the task's Markdown file and hands it to the tasks
 downstream. Do not finish with a status report about the work; finish with the
 work.
 
-Trees then asks you, in the same thread, for a summary spec of at most 200
+Project Trees then asks you, in the same thread, for a summary spec of at most 200
 words. Answer with the summary text alone — under the default handoff, that
 text is all a downstream task receives.
 
@@ -36,7 +36,7 @@ title.
 | Command                                                         | Purpose                                                                                                                                                                                                      |
 | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `bb tree ready [--project <tree>]`                              | Every task whose dependencies are satisfied, across all trees or in one. Start here.                                                                                                                         |
-| `bb tree project list\|create\|show\|rename\|delete`            | Manage trees. A tree belongs to no bb project: its files stay in the Trees folder and each agent task names the project it works in.                                                                         |
+| `bb tree project list\|create\|show\|rename\|delete`            | Manage trees. A tree belongs to no bb project: its files stay in the Project Trees folder and each agent task names the project it works in.                                                                         |
 | `bb tree node list\|show\|create\|update\|move\|delete`         | Manage the tasks in a tree. `--x`/`--y` on `create` and `move` set a task's place on the canvas; `--handoff summary\|custom\|full` sets what it passes downstream.                                           |
 | `bb tree dep add\|remove --parent <task> --child <task>`        | Wire or unwire a dependency. Loops are refused.                                                                                                                                                              |
 | `bb tree context <task>`                                        | Print the exact context an agent task will receive.                                                                                                                                                          |
@@ -59,9 +59,9 @@ Task file paths in `--content-file` resolve on the invoking machine (the
 thread's machine inside an agent thread, otherwise the server's); pass
 `--machine <id-or-name>` to target another enrolled machine.
 
-## The Trees folder
+## The Project Trees folder
 
-Trees has one setting, `rootDirectory` (default `~/Trees`): the folder holding
+Project Trees has one setting, `rootDirectory` (default `~/Trees`): the folder holding
 one subdirectory per tree. Change it with
 `bb plugin config trees set rootDirectory <path>`. The value must be absolute or
 start with `~/`; a relative path is refused. It resolves on the primary machine,
@@ -185,7 +185,7 @@ arriving as text about a picture nobody was shown.
 
 A completed task goes **stale** when the inputs it was completed against change:
 an upstream summary or output changed, the task's own instruction changed, or an
-upstream task is itself stale. Trees never silently reruns anything. Resolve it
+upstream task is itself stale. Project Trees never silently reruns anything. Resolve it
 one of two ways:
 
 - `bb tree reopen <task>` to redo the work against the updated context.
