@@ -7,6 +7,7 @@
     { "name": "pr-board", "source": "./bb-plugin-pr-board" },
     { "name": "thread-meter", "source": "./bb-plugin-thread-meter" },
     { "name": "thread-router", "source": "./bb-plugin-thread-router" },
-    { "name": "trees", "source": "./bb-plugin-trees" }
+    { "name": "trees", "source": "./bb-plugin-trees" },
+    { "name": "wiki", "source": "./bb-plugin-wiki" }
   ]
 }
