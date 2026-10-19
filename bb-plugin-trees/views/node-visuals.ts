@@ -20,7 +20,8 @@ export const STATE_CARD_CLASS: Record<NodeState, string> = {
   blocked: "border-border bg-muted/40",
   ready: "border-timeline-accent bg-card",
   in_progress: "border-warning bg-warning/10",
-  completed: "border-success/50 bg-card",
+  completed:
+    "border-success/50 bg-card opacity-40 transition-opacity hover:opacity-100",
   stale: "border-destructive bg-destructive/10",
 };
 

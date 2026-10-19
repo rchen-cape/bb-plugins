@@ -113,6 +113,17 @@ describe("GraphCanvas", () => {
     expect(document.querySelectorAll("svg path")).toHaveLength(1);
   });
 
+  it("fades a completed task until it is selected", () => {
+    const done = node({ ...child, state: "completed" });
+    setup({ nodes: [parent, done] });
+    expect(cardOf("Child").className).toContain("opacity-40");
+    expect(cardOf("Parent").className).not.toContain("opacity-40");
+    cleanup();
+    setup({ nodes: [parent, done], selectedNodeId: done.id });
+    expect(cardOf("Child").className).toContain("opacity-100");
+    expect(cardOf("Child").className).not.toContain("opacity-40");
+  });
+
   it("selects a task on a press that did not drag, without any click event", () => {
     const handlers = setup();
     const card = cardOf("Parent");

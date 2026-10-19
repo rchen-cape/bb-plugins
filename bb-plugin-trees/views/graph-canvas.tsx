@@ -584,7 +584,7 @@ export function GraphCanvas({
                   "absolute rounded-md border shadow-xs",
                   grabMode ? "cursor-grab" : "cursor-pointer",
                   STATE_CARD_CLASS[node.state],
-                  isSelected && "ring-2 ring-ring",
+                  isSelected && "opacity-100 ring-2 ring-ring",
                   ((drag?.kind === "move" && drag.nodeId === node.id) ||
                     drag?.kind === "pan") &&
                     "cursor-grabbing",
