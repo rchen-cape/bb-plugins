@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { experimental_Diff as Diff, useBbNavigate } from "@get-bb/plugin-sdk/app";
+import { experimental_Diff as Diff, experimental_usePluginId, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import { Button } from "./ui/button";
 import { Icon } from "./ui/icon";
 import { Input } from "./ui/input";
 import { cn } from "../lib/utils";
 import type { Card, CardPreview, Destination, DocSummary, DocTarget, TagSuggestion } from "../contract";
+import { parseCardMediaLine, type CardMediaLine } from "../lib/card-media";
 import { DEFAULT_HEADING, LIMITS, WIKI_PANEL } from "../lib/wiki";
 import { slugify } from "../lib/slug";
 import { ErrorText, Kbd, RuleBadge, Spinner, TagChip, formatDate, isTypingTarget } from "./bits";
@@ -29,11 +30,11 @@ import {
   type SuggestionGroup,
 } from "./card-edit";
 import { DocPicker } from "./DocPicker";
-import { noteDateLabel } from "./doc-render";
-import { errorMessage, useWikiRpc } from "./hooks";
+import { cardMediaUrl, errorMessage, useWikiRpc } from "./hooks";
 import { useKeyScope } from "./key-scope";
 import { docSubPath, inboxSubPath } from "./nav";
 import { restoredCards } from "./requests";
+import { SourceChip } from "./SourceChip";
 
 const SAVE_DELAY_MS = 300;
 const NO_CONTENT = "Turn on a destination that receives the text.";
@@ -149,53 +150,36 @@ function usePreview(cardId: string, open: boolean, version: string, flush: () =>
   return state;
 }
 
-function SourceChip({ card }: { card: Card }) {
-  const navigate = useBbNavigate();
-  const { source } = card;
-  if (source.kind === "notes" && source.origin === "file") {
-    return (
-      <span title={source.notePath} className="inline-flex max-w-full items-center gap-1 rounded-md border border-border px-1.5 py-px text-xs text-foreground">
-        <Icon name="FileText" className="size-3.5 shrink-0 text-muted-foreground" />
-        <span className="truncate">
-          {source.notePath}
-          {source.section === undefined ? null : <span className="text-muted-foreground"> › {source.section}</span>}
-        </span>
-      </span>
-    );
-  }
-  if (source.kind === "notes") {
-    return (
-      <span title={source.notePath} className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-px text-xs text-foreground">
-        <Icon name="Calendar" className="size-3.5 text-muted-foreground" />
-        {noteDateLabel(source.noteDate)} notes
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <button
-        type="button"
-        onClick={() => navigate.toThread(source.threadId)}
-        className="inline-flex max-w-64 cursor-pointer items-center gap-1 rounded-md border border-border px-1.5 py-px text-xs text-foreground hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-      >
-        <Icon name="MessageSquare" className="size-3.5 text-muted-foreground" />
-        <span className="truncate">{source.threadTitle ?? "Thread"}</span>
-      </button>
-      <span className="inline-flex items-center gap-1 rounded-md bg-surface-attention px-1.5 py-px text-xs text-warning-text">
-        <Icon name="Bot" className="size-3.5" />
-        Written by an agent
-      </span>
-    </span>
-  );
-}
-
 interface CardLinesProps {
+  cardId: string;
   lines: readonly string[];
   active: Destination | null;
   onLineClick: (index: number, extend: boolean) => void;
 }
 
-function CardLines({ lines, active, onLineClick }: CardLinesProps) {
+function LineImage({ image }: { image: CardMediaLine }) {
+  const pluginId = experimental_usePluginId();
+  return (
+    <span className="flex flex-col items-start gap-1 py-1 font-sans">
+      <img
+        src={cardMediaUrl(pluginId, image.path)}
+        alt={image.caption === "" ? "Image" : image.caption}
+        loading="lazy"
+        draggable={false}
+        className="max-h-48 max-w-full rounded-md border border-border bg-background object-contain"
+      />
+      {image.caption === "" ? null : <span className="text-muted-foreground">{image.caption}</span>}
+    </span>
+  );
+}
+
+function LineContent({ cardId, line }: { cardId: string; line: string }) {
+  const image = parseCardMediaLine(line, cardId);
+  if (image !== null) return <LineImage image={image} />;
+  return <>{line === "" ? " " : line}</>;
+}
+
+function CardLines({ cardId, lines, active, onLineClick }: CardLinesProps) {
   return (
     <ol aria-label="Note lines" className="overflow-x-auto rounded-md border border-border bg-surface-recessed py-1 font-mono text-xs leading-5">
       {lines.map((line, index) => {
@@ -218,7 +202,9 @@ function CardLines({ lines, active, onLineClick }: CardLinesProps) {
                 {index + 1}
               </button>
             )}
-            <span className="min-w-0 flex-1 whitespace-pre-wrap break-words pr-3 text-foreground">{line === "" ? " " : line}</span>
+            <span className="min-w-0 flex-1 whitespace-pre-wrap break-words pr-3 text-foreground">
+              <LineContent cardId={cardId} line={line} />
+            </span>
           </li>
         );
       })}
@@ -465,7 +451,29 @@ function previewPath(preview: CardPreview): string {
   return `${preview.slug ?? slugify(preview.title)}.md`;
 }
 
-function PreviewSection({ cardId, version, flush }: { cardId: string; version: string; flush: () => Promise<boolean> }) {
+function MissingImage({ target, uploaded }: { target: string; uploaded: boolean }) {
+  if (uploaded) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        Image missing from the Wiki's data folder: <code className="font-mono">{target}</code>. Accepting will fail; skip this card and send the image again.
+      </p>
+    );
+  }
+  return (
+    <p className="text-sm text-muted-foreground">
+      Image not found in the notes folder: <code className="font-mono">{target}</code>; it will be kept as written.
+    </p>
+  );
+}
+
+interface PreviewSectionProps {
+  cardId: string;
+  uploaded: boolean;
+  version: string;
+  flush: () => Promise<boolean>;
+}
+
+function PreviewSection({ cardId, uploaded, version, flush }: PreviewSectionProps) {
   const [open, setOpen] = useState(false);
   const { previews, missingImages, error } = usePreview(cardId, open, version, flush);
   return (
@@ -484,9 +492,7 @@ function PreviewSection({ cardId, version, flush }: { cardId: string; version: s
         <div id={`preview-${cardId}`} className="flex flex-col gap-3">
           {error !== null ? <ErrorText>{error}</ErrorText> : null}
           {missingImages.map((target) => (
-            <p key={target} className="text-sm text-muted-foreground">
-              Image not found in the notes folder: <code className="font-mono">{target}</code>; it will be kept as written.
-            </p>
+            <MissingImage key={target} target={target} uploaded={uploaded} />
           ))}
           {previews === null ? (
             error === null ? (
@@ -663,7 +669,7 @@ export function CardView({ card, docs, position, onPrev, onNext, onResolved }: C
         </Button>
       </header>
 
-      <CardLines lines={card.lines} active={editable ? active : null} onLineClick={onLineClick} />
+      <CardLines cardId={card.id} lines={card.lines} active={editable ? active : null} onLineClick={onLineClick} />
       {active !== null && editable ? (
         <p className="-mt-2 text-xs text-muted-foreground">
           Click line numbers to choose what goes to <span className="text-foreground">{targetTitle(active.target, docIndex)}</span>. Shift-click selects a
@@ -712,7 +718,7 @@ export function CardView({ card, docs, position, onPrev, onNext, onResolved }: C
         {saveError === null ? null : <ErrorText>Couldn't save this change: {saveError}</ErrorText>}
       </section>
 
-      <PreviewSection cardId={card.id} version={`${card.updatedAt}:${savedCount}`} flush={flush} />
+      <PreviewSection cardId={card.id} uploaded={card.source.kind === "upload"} version={`${card.updatedAt}:${savedCount}`} flush={flush} />
 
       <footer className="sticky bottom-0 -mx-4 flex flex-wrap items-center gap-2 border-t border-border bg-background px-4 py-3 md:-mx-6 md:px-6">
         <Button disabled={blocker !== null || busy !== null} aria-describedby={blocker === null ? undefined : `blocker-${card.id}`} onClick={() => void accept()}>

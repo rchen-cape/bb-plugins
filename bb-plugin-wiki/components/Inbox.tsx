@@ -5,6 +5,7 @@ import { Button } from "./ui/button";
 import { Icon } from "./ui/icon";
 import { cn } from "../lib/utils";
 import type { Card, DocSummary, IngestResult, WikiStatus } from "../contract";
+import { cardTextLine, uploadIcon, uploadOrigin } from "../lib/card-media";
 import { WIKI_PANEL } from "../lib/wiki";
 import { EmptyState, ErrorText, Kbd, RuleBadge, Spinner, TagChip, formatDate } from "./bits";
 import { CardView } from "./CardView";
@@ -45,16 +46,22 @@ export function useIngestNow() {
 
 export function cardSourceLabel(card: Card): string {
   if (card.source.kind === "agent") return card.source.threadTitle ?? "Agent";
+  if (card.source.kind === "upload") return uploadOrigin(card.source.pluginId);
   if (card.source.origin === "file") return card.source.notePath.slice(card.source.notePath.lastIndexOf("/") + 1);
   return noteDateLabel(card.source.noteDate);
 }
 
+function cardSourceIcon(card: Card): string | null {
+  if (card.source.kind === "agent") return "Bot";
+  return card.source.kind === "upload" ? uploadIcon(card.source.pluginId) : null;
+}
+
 export function cardFirstLine(card: Card): string {
-  const line = card.lines.find((candidate) => candidate.trim() !== "") ?? card.text;
-  return line.replace(/^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?/, "").trim();
+  return cardTextLine(card).replace(/^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?/, "").trim();
 }
 
 function CardRow({ card, selected, onSelect }: { card: Card; selected: boolean; onSelect: () => void }) {
+  const icon = cardSourceIcon(card);
   return (
     <li>
       <button
@@ -67,7 +74,7 @@ function CardRow({ card, selected, onSelect }: { card: Card; selected: boolean; 
         )}
       >
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          {card.source.kind === "agent" ? <Icon name="Bot" className="size-3.5" /> : null}
+          {icon === null ? null : <Icon name={icon} className="size-3.5" />}
           <span className="min-w-0 truncate">{cardSourceLabel(card)}</span>
           <span className="flex-1" />
           {card.status === "routing" ? <Spinner label="Routing" /> : <RuleBadge rule={card.rule} />}

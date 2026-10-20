@@ -279,9 +279,11 @@ function cardSection(ctx: WikiContext, card: Card): string {
   const source =
     card.source.kind === "agent"
       ? `Agent text from thread ${card.source.threadId}`
-      : card.source.origin === "file"
-        ? `File: ${card.source.notePath}${card.source.section === undefined ? "" : ` › ${card.source.section}`} (a reference note, not a daily note; the default heading is its section)`
-        : `Note: ${formatNoteDateShort(card.source.noteDate)} (${card.source.notePath})`;
+      : card.source.kind === "upload"
+        ? `Upload: ${card.source.name}`
+        : card.source.origin === "file"
+          ? `File: ${card.source.notePath}${card.source.section === undefined ? "" : ` › ${card.source.section}`} (a reference note, not a daily note; the default heading is its section)`
+          : `Note: ${formatNoteDateShort(card.source.noteDate)} (${card.source.notePath})`;
   const tags = card.tags.length === 0 ? "Tags: none" : `Tags: ${card.tags.map((tag) => describeTag(ctx, tag)).join(", ")}`;
   const lines = card.lines.map((line, index) => `${index} | ${line}`);
   return [`### ${card.id}`, source, tags, provisionalLine(ctx, card), "Lines:", ...lines].join("\n");

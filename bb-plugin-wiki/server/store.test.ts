@@ -503,6 +503,17 @@ describe("cards", () => {
     expect(agentCard.id).not.toBe(card.id);
   });
 
+  it("creates a card under an id picked ahead of time, once", () => {
+    const { store } = setup();
+    const id = store.newCardId();
+    expect(id).toMatch(/^card_[a-z0-9]{8}$/);
+    const upload = store.createCard(newCard({ source: { kind: "upload", name: "Roadmap.png", pluginId: "sketch", threadId: null } }), id);
+    expect(upload.id).toBe(id);
+    expect(store.getCard(id)).toEqual(upload);
+    expect(() => store.createCard(newCard(), id)).toThrow();
+    expect(store.newCardId()).not.toBe(id);
+  });
+
   it("rejects an invalid card without storing it", () => {
     const { store } = setup();
     expect(() => store.createCard(newCard({ destinations: [destination({ heading: "" })] }))).toThrow();

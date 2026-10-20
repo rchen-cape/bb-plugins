@@ -10,6 +10,7 @@ This file is the build contract. Section 13 lists who owns which file.
    - "Add to Wiki" from a thread message, the code block button, drag and drop, and manual docs. The user did these on purpose and confirms the destination in a dialog before anything is written.
    - An image description written by Claude Code. It is shown in an editable field and is only saved when the user saves.
    - Text from the `wiki_add` agent tool. This always becomes a **pending inbox card**, marked as written by an agent, and never writes directly.
+   - Images (and optional text) another plugin sends with `addCard`. These always become **pending inbox cards**, marked with the sending plugin, and never write directly.
 2. **Append, don't rewrite.** Writes only ever add a block under a heading, create a heading, create a doc, or add an alias to frontmatter. The plugin never edits or removes existing doc text. The only exception is when the user edits a doc in the Wiki editor.
 3. **One home per fact.** When content belongs to a topic or process doc, the project doc gets a *template* link line (`- See [[Doc title]] (from 10-14-26)`), never a copy.
 4. **Wiki and Notes stay separate.** The Wiki only ever *reads* the notes folder. The only contract is the file format: the daily note name `MM-DD-YY.md`, the `### NOTES` heading (an optional trailing colon is allowed), and `@tag` lines. In the other direction, Notes reads `<wiki>/.wiki/tags.json` and never imports Wiki code.
@@ -155,11 +156,12 @@ Card = {
   status: "routing" | "pending" | "accepted" | "skipped",
   source:
     | { kind: "notes"; notePath: string; noteDate: string; unitHash: string }
-    | { kind: "agent"; threadId: string; threadTitle: string | null },
-  text: string,                       // verbatim unit text, or the agent's text
+    | { kind: "agent"; threadId: string; threadTitle: string | null }
+    | { kind: "upload"; name: string; pluginId: string | null; threadId: string | null },
+  text: string,                       // verbatim unit text, the agent's text, or an upload's text plus image lines
   lines: string[],
   tags: string[],                     // block + inline tags
-  rule: "explicit-link" | "tag" | "agent" | "none",
+  rule: "explicit-link" | "tag" | "agent" | "picked" | "none",
   reason: string,                     // one sentence shown on the card
   destinations: Destination[],
   tagSuggestions: { tag: string; slug: string; title: string; score: number }[], // did-you-mean for unknown tags
@@ -190,11 +192,20 @@ Destination = {
    - For `content`, take the selected lines from `card.lines`, de-indented by the minimum indent of the selection.
    - For `link`, use the template.
    - Rewrite image paths: copy each referenced image from the notes folder into `assets/`, and point the link at `assets/<file>`. A relative image path is looked up from the note's folder, then from each parent folder up to the notes root. An image that is not found stays as written, and the card preview lists it as not found.
+   - For an `upload` card, only `card-media/<card id>/<file>` images are copied, the same way, from the plugin data folder. If one is gone, the accept fails before writing anything. Other image links stay as written.
 3. Prepend the source marker, then `insertUnderHeading`. Create the doc if it is `new`.
 4. Each destination is recorded on the card as written (`written: true`, turned off, "Already added.") right after its append, so a retry or a crash never writes it twice; a written destination cannot be turned back on. Link lines list every content doc the card was written to, including ones from an earlier, partly failed accept.
 5. Reindex, mark the unit `accepted`, set the card to `accepted`, then make one git commit per card: `Wiki: <first 60 chars of text> → <doc titles>`. Publish `wiki-changed` and `wiki-inbox`.
 
 **Skip:** set the card to `skipped` and the unit to `skipped`, so it never comes back.
+
+**Upload cards** (`addCard`, `createUploadCard` in `server/cards.ts`):
+- The source is `{ kind: "upload", name, pluginId, threadId }`. `pluginId` comes from the RPC handler's `experimental_caller` (`{ kind: "plugin", pluginId }`), else `null`; never from input. `threadId` comes from the input: the thread a CLI send ran in (like `bb sketch send` inside a thread), else `null`. Rows stored before this field read as `null`. A card with a `threadId` counts as sent by an agent: its reasons say "by an agent", CardView shows the "Sent by an agent" pill, and `bb wiki accept` from inside a thread refuses it, like an agent card.
+- Refuse a card with no text and no media, and text or captions that carry a `wiki:source` marker (like agent cards). Media must be images (`.png .jpg .jpeg .gif .webp`); videos and text files are refused with a message that says what to do instead.
+- Each image is copied at once into `<plugin data dir>/card-media/<card id>/<slug of its name>.<ext>` (`-2`, `-3`, … for repeats), so the card outlives the 24-hour upload cleanup. The card id is picked before the copy, and the folder is removed again if the card can't be stored.
+- The card text is the text (leading blank lines and trailing space trimmed), then one `![caption](card-media/<card id>/<file>)` line per image, joined by blank lines. The caption's whitespace is collapsed and each `\`, `[` and `]` gets a backslash (`imageAlt` in `lib/card-media.ts`), so captions like `See [[Roadmap]]` or `a]b` never break the line; the card view, preview, and accept all read the escapes back.
+- Status `pending`, never routed. With a `target`: one included destination, rule `picked` (badge "picked when sent"); the heading defaults to `Unsorted`, or `Notes` for a new doc, and a new-doc title that names an existing doc becomes that doc. Without one: like an agent card with no doc, an unticked new topic doc titled from the name, under `heading` or `Notes`, rule `none`.
+- Accept stamps the `upload="<name>"` source marker and commits the copied assets with the doc. The commit subject skips the image lines, or uses the name when there is no text. Preview shows each image's planned `assets/` path. Skip and restore keep the card media. Once an accept is fully written and committed, the card's `card-media/<card id>/` folder is removed; a failed or partial accept keeps it for the retry.
 
 **Update** (`updateCard`): the user edits destinations (include toggle, doc, heading, line ranges, new-doc title or type) and remembered aliases. The server validates these: slugs must exist and line ranges must be in bounds.
 
@@ -260,6 +271,7 @@ Only one ingest runs at a time, through a promise lock.
   - images: `![caption](assets/x.png)`
   - video: `<video controls src="assets/x.mp4"></video>` plus the caption line
   - text files (`.md`, `.txt`): their content is the `text`
+- `addCard`: `{ name, text, media: { from, caption }[], target: DocTarget|null, heading|null, threadId: string|null }` → `Card`. Files an image (plus optional text) from another plugin as a pending `upload` inbox card (section 6). This is how Sketch sends a drawing to the inbox.
 - `inbox`: `{ status: "open"|"accepted"|"skipped" }` → `Card[]`. `"open"` means `routing` plus `pending`, oldest first.
 - `card`: `{ id }` → `Card | null`
 - `updateCard`: `{ id, destinations, rememberAliases }` → `Card`
@@ -276,6 +288,7 @@ Only one ingest runs at a time, through a promise lock.
 
 **HTTP:**
 - `GET /asset?path=assets/x.png`, local auth. It serves a file under `<wiki>/assets` (or any doc-relative path inside the root), checks the resolved path stays inside the root, sets the correct content type, and supports `Range` with a 206 response for video.
+- `GET /card-media?path=card-media/<card id>/<file>`, local auth. It serves an upload card's image from `<plugin data dir>/card-media/` for the inbox thumbnails: image types only, `nosniff`, `Range` support, and 404 for anything outside that folder (`..`, symlinks, hidden files, nested paths).
 - `POST /upload?name=<file>`, token auth. It streams the body to `<plugin data dir>/uploads/<id>` (the data dir comes from `PRAGMA database_list`, like Tasks), with a 1 GB cap that returns 413. It accepts `.png .jpg .jpeg .gif .webp .mp4 .mov .webm .md .txt`, and returns `{ uploadId, name, sizeBytes }`. Uploads older than 24 h are deleted at startup.
 
 **Agent tools:**
@@ -290,7 +303,7 @@ Only one ingest runs at a time, through a promise lock.
 - `search <query…> [--json] [--limit]`
 - `show <doc> [--heading]`
 - `docs [--type]`
-- `inbox [--status] [--json]`
+- `inbox [--status] [--json]` (upload cards show as `upload: <name>`; their first line skips image lines and falls back to the name, like the inbox list)
 - `accept <card>`, `skip <card>`
 - `ingest [--since YYYY-MM-DD] [--no-agent]`
 - `add --doc <doc>|--new <title> [--type] [--heading] --text <md>`
@@ -340,10 +353,11 @@ Copy the UI primitives and patterns from Library (`components/ui/*`, `lib/utils.
 **DocEditor.** A textarea editor (monospace) with ⌘S or ⌘Enter to save and Esc to cancel. It saves with `expectedSha256`. On conflict, show the "Changed on disk" banner with Reload and Overwrite (Docs pattern).
 
 **Inbox and CardView** (the review workflow; fast, keyboard driven):
-- **Card list.** The list shows a source chip (note date, or thread), the first line, tag chips, the rule badge, and the status (`routing` gets a spinner).
+- **Card list.** The list shows a source chip (note date, thread, or "From Sketch" / "Upload"), the first line (for an upload card, its first text line, else its name, never the raw image line), tag chips, the rule badge, and the status (`routing` gets a spinner).
 - **CardView** shows:
-  - the verbatim text, rendered as monospace lines with line numbers;
-  - `reason` and the rule badge ("Decided by: tag @unified-notification" / "explicit [[link]]" / "Claude Code" / "no rule");
+  - the source chip: note date, file, thread plus "Written by an agent", or for an upload card "From <Plugin>" (the title-cased plugin id, "Upload" when null) plus its name, plus a "Sent by an agent" pill only when it has a `threadId`;
+  - the verbatim text, rendered as monospace lines with line numbers; an upload card's own `card-media/` image lines render as thumbnails (`GET /card-media`) with their caption;
+  - `reason` and the rule badge ("Decided by: tag @unified-notification" / "explicit [[link]]" / "Claude Code" / "picked when sent" / "no rule");
   - **destinations**, one row each, with:
     - an include checkbox;
     - a doc picker (search existing docs, or "New doc…" with title and type);

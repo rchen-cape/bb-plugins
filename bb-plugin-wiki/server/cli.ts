@@ -12,6 +12,7 @@ import {
   type IngestResult,
   type WikiStatus,
 } from "../contract.js";
+import { cardTextLine, sentByAgent } from "../lib/card-media.js";
 import { formatNoteDateShort } from "../lib/daily-notes.js";
 import { DEFAULT_DOC_TYPE, DEFAULT_HEADING, DOC_TYPES, LIMITS, NEW_DOC_HEADING, truncate } from "../lib/wiki.js";
 import { acceptCard, restoreCard, skipCard } from "./cards.js";
@@ -82,13 +83,13 @@ async function refuseJobThread(ctx: WikiContext, cli: PluginCliContext): Promise
   throw new PluginCliError(JOB_THREAD_REFUSAL, { code: "needs_user", hint: JOB_HINT });
 }
 
-function firstLine(text: string): string {
-  const line = text.split(/\r?\n/).find((entry) => entry.trim() !== "") ?? "";
-  return truncate(line.trim().replace(/\s+/g, " "), FIRST_LINE);
+function firstLine(card: Card): string {
+  return truncate(cardTextLine(card).trim().replace(/\s+/g, " "), FIRST_LINE);
 }
 
 function cardSource(card: Card): string {
   if (card.source.kind === "notes") return card.source.origin === "file" ? card.source.notePath : `${formatNoteDateShort(card.source.noteDate)} notes`;
+  if (card.source.kind === "upload") return `upload: ${truncate(card.source.name, 40)}`;
   return card.source.threadTitle === null ? "agent" : `agent: ${truncate(card.source.threadTitle, 40)}`;
 }
 
@@ -105,7 +106,7 @@ function destinationLabel(card: Card): string {
 
 export function cardLines(cards: readonly Card[]): string[] {
   if (cards.length === 0) return ["No cards."];
-  return cards.map((card) => [card.id, card.status, cardSource(card), firstLine(card.text), destinationLabel(card)].join("\t"));
+  return cards.map((card) => [card.id, card.status, cardSource(card), firstLine(card), destinationLabel(card)].join("\t"));
 }
 
 export function docLines(docs: readonly DocSummary[]): string[] {
@@ -228,8 +229,9 @@ function inboxCommands(ctx: WikiContext) {
       async run({ positionals, options }, cli) {
         await refuseJobThread(ctx, cli);
         const card = requireCard(ctx, positionals.card);
-        if (card.source.kind === "agent" && inThread(cli) !== null) {
-          throw new PluginCliError(`${card.id} was written by an agent; only the user can accept it.`, { code: "needs_user", hint: REVIEW_HINT });
+        if (sentByAgent(card.source) && inThread(cli) !== null) {
+          const how = card.source.kind === "agent" ? "written" : "sent";
+          throw new PluginCliError(`${card.id} was ${how} by an agent; only the user can accept it.`, { code: "needs_user", hint: REVIEW_HINT });
         }
         const accepted = await guarded(CARD_HINT, () => acceptCard(ctx, card.id));
         return output(options.json, accepted, [`Accepted ${accepted.id} into ${destinationLabel(accepted)}.`]);

@@ -1,3 +1,4 @@
+import type { ExperimentalPluginRpcHandlerContext } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
   rpcContract,
@@ -15,7 +16,7 @@ import {
 import { stripSourceMarkers, type SourceMarker } from "../lib/markdown-doc.js";
 import { normalizeTag } from "../lib/slug.js";
 import { LIMITS, truncate, type DocType } from "../lib/wiki.js";
-import { acceptCard, missingCardImages, previewCard, restoreCard, skipCard, updateCardDestinations } from "./cards.js";
+import { acceptCard, createUploadCard, missingCardImages, previewCard, restoreCard, skipCard, updateCardDestinations } from "./cards.js";
 import type { WikiContext } from "./context.js";
 import { runImport, runIngest } from "./ingest.js";
 import {
@@ -372,6 +373,11 @@ function friendly<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) =
   };
 }
 
+function callerPluginId(context: ExperimentalPluginRpcHandlerContext): string | null {
+  const caller = context.experimental_caller;
+  return caller.kind === "plugin" ? caller.pluginId : null;
+}
+
 export function registerRpc(ctx: WikiContext): void {
   ctx.bb.rpc.register(rpcContract, {
     status: friendly(() => statusOf(ctx)),
@@ -382,6 +388,7 @@ export function registerRpc(ctx: WikiContext): void {
     search: friendly((input) => ctx.store.search(input)),
     suggest: friendly(async ({ text, title }) => ({ suggestions: await suggestDocs(ctx, text, title) })),
     addToDoc: friendly((input) => addToDoc(ctx, input)),
+    addCard: friendly((input, context) => createUploadCard(ctx, { ...input, pluginId: callerPluginId(context) })),
     inbox: friendly(({ status }) => ctx.store.listCards(status)),
     card: friendly(({ id }) => ctx.store.getCard(id)),
     updateCard: friendly(({ id, destinations, rememberAliases }) => updateCard(ctx, id, destinations, rememberAliases)),

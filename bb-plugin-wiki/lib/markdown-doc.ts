@@ -134,7 +134,7 @@ const NAMED_ENTITIES: Record<string, string> = { amp: "&", quot: '"', lt: "<", g
 const WIKI_LINK = /(!?)\[\[([^[\]\n]+)\]\]/g;
 const TICKS_OR_BREAK = /`+|[\n\r\u2028\u2029]/g;
 const MARKDOWN_IMAGE =
-  /!\[(?:[^[\]\n]|\[[^[\]\n]*\])*\]\([ \t]*(<[^<>\n]*>|[^\s()<>]+(?:\([^\s()<>]*\)[^\s()<>]*)*)(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*\)/dg;
+  /!\[(?:[^[\]\\\n]|\\.|\[(?:[^[\]\\\n]|\\.)*\])*\]\([ \t]*(<[^<>\n]*>|[^\s()<>]+(?:\([^\s()<>]*\)[^\s()<>]*)*)(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*\)/dg;
 const EMBED_IMAGE = /!\[\[([^[\]\n|#]+)(?:[|#][^[\]\n]*)?\]\]/dg;
 const NON_LOCAL_TARGET = /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i;
 const FLOW_OPTIONS: ToStringOptions = { lineWidth: 0, flowCollectionPadding: false };

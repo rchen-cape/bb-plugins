@@ -47,7 +47,8 @@ becomes a card in the Wiki inbox, marked as written by an agent; nothing is
 written until the user accepts it there. Tell the user the card id it returns.
 
 From inside a thread, `bb wiki add` and `bb wiki new --body` also file inbox
-cards instead of writing, `bb wiki accept` refuses agent-written cards, and
+cards instead of writing, `bb wiki accept` refuses agent-written cards and
+upload cards an agent sent from a thread (like `bb sketch send` there), and
 `bb wiki alias`, `bb wiki rename` and `bb wiki delete` are refused there; only the
 user adds aliases, renames docs, or deletes them.
 In a Wiki routing or image-description thread, record results only with that
@@ -68,6 +69,9 @@ bb wiki import <folder…> [--no-agent]
 
 Accept or skip a card only when the user asks for that card. Each daily note
 unit is copied word for word; routing only picks the doc, heading, and lines.
+Cards listed as `upload: <name>` hold images sent from another plugin, such
+as Sketch, by the user or by an agent in a thread; accepting copies the images
+into the Wiki's `assets/`.
 
 ## Other commands
 

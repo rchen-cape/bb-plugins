@@ -509,6 +509,10 @@ async function fileDigest(file: string): Promise<string> {
   return hash.digest("hex");
 }
 
+export async function plannedAssetPath(absPath: string): Promise<string> {
+  return `${ASSETS_DIR}/${assetFileName(absPath, undefined)(1, await fileDigest(absPath))}`;
+}
+
 async function sameContent(target: string, existing: Stats, size: number, digest: string): Promise<boolean> {
   return existing.isFile() && existing.size === size && (await fileDigest(target)) === digest;
 }

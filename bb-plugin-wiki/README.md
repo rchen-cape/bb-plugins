@@ -37,7 +37,8 @@ where a card goes:
 - **`@skip`.** Leaves the line, or the whole block, out of the Wiki.
 
 Each card shows which rule decided it: `explicit [[link]]`, `tag`,
-`Claude Code`, or `no rule`, with a one-line reason.
+`Claude Code`, or `no rule`, with a one-line reason. Cards from other plugins
+show `picked when sent` when the sender chose the doc.
 
 Today's note and future-dated notes are never read, because you are still
 writing them. Notes that haven't changed since the last run are skipped, and a
@@ -84,6 +85,15 @@ Accepting copies the selected lines word for word. The only changes are
 removing their shared indent and pointing images at the Wiki's `assets/`
 folder, where the images are copied.
 
+Cards that another plugin sent, like an image from Sketch, say where they came
+from ("From Sketch · Roadmap.png") and show each image as a thumbnail. A card
+an agent sent from a thread also shows **Sent by an agent**, and only you can
+accept it. They start with the doc and heading picked when they were sent
+(`picked when sent`), or with an unticked new doc when none was picked.
+**Preview change** shows the `assets/` path each image will get. Skipping
+writes nothing and keeps the image, so **Undo** still works. Accepting copies
+the image into `assets/` and then deletes the card's own copy.
+
 ## Add to Wiki
 
 You can also add things on purpose. A dialog always shows the text and the
@@ -110,6 +120,41 @@ destination before anything is written.
 The dialog suggests where the text belongs ("Best match: Unified
 notification › Global token"), from a local search of your docs. Press
 `⌘Enter` to add.
+
+## From other plugins
+
+Other plugins can add to the Wiki through its RPC methods. `addToDoc` writes
+straight into a doc. `addCard` files an image, with optional Markdown text, as
+an inbox card for you to review:
+
+```ts
+await bb.sdk.plugins.callRpc({
+  pluginId: "wiki",
+  method: "addCard",
+  input: {
+    name: "Roadmap.png",
+    text: "Q3 plan, first draft",
+    media: [{ from: { kind: "path", path: "/abs/path/roadmap.png" }, caption: "Q3 roadmap" }],
+    target: { kind: "existing", slug: "unified-notification" },
+    heading: null,
+    threadId: null,
+  },
+  outputSchema: z.object({ id: z.string() }),
+});
+```
+
+- `media` takes images only (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`), as an
+  absolute path or an upload id. The Wiki copies each one right away, so the
+  file can be deleted after the call.
+- `target` and `heading` are the proposed destination, or `null`. The heading
+  defaults to `Unsorted`, or `Notes` for a new doc.
+- The card shows the calling plugin's name, taken from the call itself. A call
+  from the app or `bb plugin rpc call` shows as **Upload**.
+- `threadId` is the thread a command ran in when an agent sent the card (for
+  example `bb sketch send` inside a thread), else `null`. Such a card shows
+  **Sent by an agent**, and `bb wiki accept` from a thread refuses it.
+- Nothing is written until you accept the card. Accepted blocks carry an
+  `upload="<name>"` source marker.
 
 ## Find things
 
@@ -168,8 +213,8 @@ falls back to its default.
 | `bb wiki search [words…] [--type <type>] [--limit <n>]` | Search docs and sections. No words lists recently updated docs. Alias `find`. |
 | `bb wiki show <doc> [--heading <heading>]` | Print a doc, or one heading of it, as Markdown. `<doc>` is a slug, title, alias, or `Title#Heading`. Aliases `get`, `cat`. |
 | `bb wiki docs [--type <type>]` | List docs: slug, type, title, aliases. Aliases `list`, `ls`. |
-| `bb wiki inbox [--status open\|accepted\|skipped]` | List inbox cards. Default `open`. |
-| `bb wiki accept <card>` | Accept a card into its included destinations. |
+| `bb wiki inbox [--status open\|accepted\|skipped]` | List inbox cards. Default `open`. Cards from other plugins show as `upload: <name>`, with their first text line, or the name when they hold only images. |
+| `bb wiki accept <card>` | Accept a card into its included destinations. From a thread, this refuses cards written or sent by an agent. |
 | `bb wiki skip <card>` | Skip a card so it never comes back. |
 | `bb wiki restore <card>` | Put a skipped card back in the inbox (alias `unskip`). The skip toast in the Wiki page has an **Undo** button that does the same. |
 | `bb wiki ingest [--since YYYY-MM-DD] [--no-agent]` | Run the ingest now. `--since` re-reads notes from that date, even unchanged ones. `--no-agent` routes by links and tags only. |
@@ -219,7 +264,10 @@ editor; the Wiki picks up changes as they happen.
 The files are the source of truth. The plugin's SQLite database
 (`<bb data dir>/plugins/wiki/`) holds only the search index, which
 `bb wiki reindex` rebuilds, plus the inbox and ingest bookkeeping. Dropped
-files wait in its `uploads/` folder and are deleted after 24 hours.
+files wait in its `uploads/` folder and are deleted after 24 hours. Images on
+inbox cards from other plugins live in its `card-media/<card id>/` folder, which
+the 24-hour cleanup leaves alone; accepting copies them into `assets/` and then
+deletes the folder, and skipped cards keep theirs so they can be restored.
 
 ## Privacy and safety
 
@@ -277,12 +325,13 @@ uses. [SPEC.md](SPEC.md) is the full design.
 | `server/ingest.ts`, `server/schedule.ts` | The ingest run and its daily schedule. |
 | `server/cards.ts` | Card routing rules, preview, accept, and skip. |
 | `server/routing.ts` | Claude Code routing and image-description threads. |
-| `server/rpc.ts`, `server/http.ts`, `server/media.ts` | RPC handlers, asset and upload routes, media copying. |
+| `server/rpc.ts`, `server/http.ts`, `server/media.ts` | RPC handlers, asset, card image, and upload routes, media copying. |
 | `server/tools.ts`, `server/cli.ts` | Agent tools and `bb wiki`. |
 | `server/suggest.ts`, `server/write.ts`, `server/maintenance.ts` | "Best match" suggestions, write helpers, upload cleanup. |
 | `lib/daily-notes.ts` | Daily note parsing: `### NOTES`, blocks, tags, links. |
 | `lib/markdown-doc.ts` | Frontmatter, headings, append, and source markers. |
 | `lib/fuzzy.ts`, `lib/slug.ts`, `lib/wiki.ts` | Did-you-mean matching, slugs and tags, shared constants. |
+| `lib/card-media.ts` | Image lines (with caption escaping), first lines, and source labels of cards from other plugins. |
 | `app.tsx` | App entry: sidebar page, message action, code block button, commands. |
 | `components/` | Wiki page, doc view and editor, inbox and card view, dialogs, search. |
 | `skills/wiki/SKILL.md` | Agent skill. |

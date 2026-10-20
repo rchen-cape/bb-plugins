@@ -1,19 +1,25 @@
-import { mkdir, mkdtemp, readdir, realpath, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { describe, expect, it } from "vitest";
-import { createWikiContext } from "./context";
+import { createWikiContext, type WikiContext } from "./context";
 import {
   MediaError,
+  cardImagesFrom,
+  cardMediaDir,
+  cardMediaFile,
   cleanUploadName,
   cleanupUploads,
   embedFor,
   extractMediaPaths,
+  findCardImage,
   formatBytes,
   importUpload,
   messageMedia,
+  removeCardImages,
   resolveMediaSource,
+  saveCardImages,
   saveUpload,
   uploadPath,
   uploadsDir,
@@ -256,5 +262,84 @@ describe("embedFor", () => {
     expect(embedFor("assets/demo.mp4", "video", "Demo of the retry flow")).toBe(
       '<video controls src="assets/demo.mp4"></video>\n\nDemo of the retry flow',
     );
+  });
+});
+
+describe("card images", () => {
+  const CARD = "card_1a2b3c4d";
+
+  async function cardFolder(ctx: WikiContext, cardId: string): Promise<string> {
+    return path.join(await realpath(cardMediaDir(ctx)), cardId);
+  }
+
+  it("copies each image into card-media/<card id>/ under a unique name and embeds it", async () => {
+    const { ctx } = await setup();
+    const first = await tempDir("wiki-card-a-");
+    const second = await tempDir("wiki-card-b-");
+    await writeFile(path.join(first, "Q3 Roadmap.png"), "PNG1");
+    await writeFile(path.join(second, "Q3 Roadmap.png"), "PNG2");
+    const upload = await saveUpload(ctx, "Whiteboard.JPG", stream("jpg"), 3);
+    const images = await cardImagesFrom(ctx, [
+      { from: { kind: "path", path: path.join(first, "Q3 Roadmap.png") }, caption: "Roadmap [v1]" },
+      { from: { kind: "path", path: path.join(second, "Q3 Roadmap.png") }, caption: "" },
+      { from: { kind: "upload", uploadId: upload.uploadId }, caption: "Board" },
+    ]);
+    expect(await saveCardImages(ctx, () => CARD, images)).toEqual({
+      cardId: CARD,
+      embeds: [
+        `![Roadmap \\[v1\\]](card-media/${CARD}/q3-roadmap.png)`,
+        `![](card-media/${CARD}/q3-roadmap-2.png)`,
+        `![Board](card-media/${CARD}/whiteboard.jpg)`,
+      ],
+    });
+    const folder = await cardFolder(ctx, CARD);
+    expect((await readdir(folder)).sort()).toEqual(["q3-roadmap-2.png", "q3-roadmap.png", "whiteboard.jpg"]);
+    expect(await readFile(path.join(folder, "q3-roadmap-2.png"), "utf8")).toBe("PNG2");
+    expect(await cardMediaFile(ctx, `card-media/${CARD}/whiteboard.jpg`)).toEqual({ file: path.join(folder, "whiteboard.jpg"), size: 3 });
+    expect(await findCardImage(ctx, CARD, `card-media/${CARD}/q3-roadmap.png`)).toBe(path.join(folder, "q3-roadmap.png"));
+    expect(await findCardImage(ctx, "card_99999999", `card-media/${CARD}/q3-roadmap.png`)).toBeNull();
+    await cleanupUploads(ctx, 0, Date.now() + 1000);
+    expect(await readdir(folder)).toHaveLength(3);
+  });
+
+  it("skips a taken folder, and makes no folder for a card without images", async () => {
+    const { ctx } = await setup();
+    const files = await tempDir("wiki-card-");
+    await writeFile(path.join(files, "a.png"), "PNG");
+    await mkdir(path.join(cardMediaDir(ctx), "card_aaaaaaaa"), { recursive: true });
+    const ids = ["card_aaaaaaaa", "card_bbbbbbbb"];
+    const images = await cardImagesFrom(ctx, [{ from: { kind: "path", path: path.join(files, "a.png") }, caption: "" }]);
+    expect((await saveCardImages(ctx, () => ids.shift() ?? "", images)).cardId).toBe("card_bbbbbbbb");
+    expect(await readdir(path.join(cardMediaDir(ctx), "card_aaaaaaaa"))).toEqual([]);
+    expect(await saveCardImages(ctx, () => "card_cccccccc", [])).toEqual({ cardId: "card_cccccccc", embeds: [] });
+    expect((await readdir(cardMediaDir(ctx))).sort()).toEqual(["card_aaaaaaaa", "card_bbbbbbbb"]);
+  });
+
+  it("removes the card's folder when a copy fails", async () => {
+    const { ctx } = await setup();
+    const files = await tempDir("wiki-card-");
+    await writeFile(path.join(files, "a.png"), "PNG");
+    const images = [
+      { path: path.join(files, "a.png"), name: "a.png", caption: "" },
+      { path: path.join(files, "gone.png"), name: "gone.png", caption: "" },
+    ];
+    await expect(saveCardImages(ctx, () => CARD, images)).rejects.toThrow();
+    expect(await readdir(cardMediaDir(ctx))).toEqual([]);
+    await removeCardImages(ctx, "../uploads");
+    await saveCardImages(ctx, () => CARD, images.slice(0, 1));
+    await removeCardImages(ctx, CARD);
+    expect(await readdir(cardMediaDir(ctx))).toEqual([]);
+  });
+
+  it("takes images only, and says what to do with videos and text", async () => {
+    const { ctx } = await setup();
+    const files = await tempDir("wiki-card-");
+    await writeFile(path.join(files, "demo.mp4"), "mp4");
+    await writeFile(path.join(files, "plan.md"), "# Plan");
+    const video = await rejection(cardImagesFrom(ctx, [{ from: { kind: "path", path: path.join(files, "demo.mp4") }, caption: "" }]));
+    expect(video.code).toBe("unsupported");
+    expect(video.message).toBe("demo.mp4 is a video. Inbox cards take images only (.png .jpg .jpeg .gif .webp); add videos straight to a doc instead.");
+    const text = await rejection(cardImagesFrom(ctx, [{ from: { kind: "path", path: path.join(files, "plan.md") }, caption: "" }]));
+    expect(text.message).toContain("plan.md is not an image.");
   });
 });

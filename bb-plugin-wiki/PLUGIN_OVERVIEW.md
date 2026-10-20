@@ -17,6 +17,9 @@ An organized wiki of your projects, topics, and processes, fed by your daily not
   language (ts, python, bash, json, …), and drag and drop for
   images, videos, Markdown, and text files. A dialog suggests the best doc and
   heading before anything is written.
+- **From other plugins.** A plugin like Sketch can send an image, with an
+  optional note, to the inbox as a card. You see where it came from and the
+  image, and pick where it goes.
 - **New doc** checks for existing docs first, so the same thing doesn't end up
   in two places.
 - Search from anywhere with `⌘⇧K`, and agent tools so agents can look up what
@@ -29,7 +32,8 @@ Nothing an AI wrote enters the Wiki unless you accept it. The daily ingest
 copies your own lines word for word. Claude Code only suggests which doc,
 heading, and lines they go to, and you can turn that off to route by tags and
 links alone. When an agent saves something, it lands in your inbox as a card
-marked as written by an agent.
+marked as written by an agent. Images other plugins send wait in the inbox
+the same way.
 
 The Wiki only adds to docs. It never rewrites or removes what is there, and it
 never writes to your notes folder. When a fact belongs in a topic doc, the

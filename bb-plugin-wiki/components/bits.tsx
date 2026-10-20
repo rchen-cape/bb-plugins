@@ -23,6 +23,7 @@ const RULE_LABELS: Record<CardRule, { label: string; title: string }> = {
   "explicit-link": { label: "explicit [[link]]", title: "The note links to this doc with [[…]], so no AI was used." },
   tag: { label: "tag", title: "An @tag in the note matches this doc's tag or alias." },
   agent: { label: "Claude Code", title: "Claude Code chose the destinations and lines. The text is still your own words." },
+  picked: { label: "picked when sent", title: "The doc was picked when this was sent, not matched from a [[link]] or @tag. Check it before adding." },
   none: { label: "no rule", title: "No link or known tag matched. Pick a destination yourself." },
 };
 

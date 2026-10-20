@@ -4,8 +4,8 @@ import path from "node:path";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { describe, expect, it } from "vitest";
 import { createWikiContext } from "./context";
-import { ASSET_PATH, UPLOAD_PATH, declaredLength, isServablePath, parseRange, registerHttp } from "./http";
-import { importUpload, uploadsDir } from "./media";
+import { ASSET_PATH, CARD_MEDIA_PATH, UPLOAD_PATH, declaredLength, isServablePath, parseRange, registerHttp } from "./http";
+import { cardMediaDir, importUpload, uploadsDir } from "./media";
 
 const VIDEO = "0123456789abcdefghij";
 
@@ -217,5 +217,67 @@ describe("POST /upload", () => {
     expect((await upload("tool.exe", "MZ")).status).toBe(415);
     const nameless = await host.harness.behavior.fetchHttp("POST", UPLOAD_PATH, { body: "x" });
     expect(nameless.status).toBe(400);
+  });
+});
+
+describe("GET /card-media", () => {
+  const CARD = "card_1a2b3c4d";
+
+  async function cardMediaSetup() {
+    const base = await setup();
+    const folder = path.join(cardMediaDir(base.ctx), CARD);
+    await mkdir(path.join(folder, "sub"), { recursive: true });
+    await writeFile(path.join(folder, "roadmap.png"), "PNGDATA");
+    await writeFile(path.join(folder, "notes.md"), "# notes");
+    await writeFile(path.join(folder, ".hidden.png"), "hidden");
+    await writeFile(path.join(folder, "sub", "deep.png"), "deep");
+    const outside = await tempDir("wiki-card-outside-");
+    await writeFile(path.join(outside, "secret.png"), "secret");
+    await symlink(path.join(outside, "secret.png"), path.join(folder, "escape.png"));
+    await mkdir(uploadsDir(base.ctx), { recursive: true });
+    await writeFile(path.join(uploadsDir(base.ctx), "upl_aaaaaaaaaaaa.png"), "upload");
+    const image = (relPath: string, headers: Record<string, string> = {}) =>
+      base.host.harness.behavior.fetchHttp("GET", `${CARD_MEDIA_PATH}?path=${encodeURIComponent(relPath)}`, { headers });
+    return { ...base, folder, outside, image };
+  }
+
+  it("serves a card's image inline with its image type", async () => {
+    const { image } = await cardMediaSetup();
+    const response = await image(`card-media/${CARD}/roadmap.png`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/png");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("content-disposition")).toContain('inline; filename="roadmap.png"');
+    expect(await response.text()).toBe("PNGDATA");
+    const partial = await image(`card-media/${CARD}/roadmap.png`, { range: "bytes=0-2" });
+    expect(partial.status).toBe(206);
+    expect(await partial.text()).toBe("PNG");
+  });
+
+  it.each([
+    "../x.png",
+    "card-media/../uploads/upl_aaaaaaaaaaaa.png",
+    `card-media/${CARD}/../../uploads/upl_aaaaaaaaaaaa.png`,
+    "uploads/upl_aaaaaaaaaaaa.png",
+    "assets/shot.png",
+    `card-media/${CARD}/notes.md`,
+    `card-media/${CARD}/.hidden.png`,
+    `card-media/${CARD}/sub/deep.png`,
+    `card-media/${CARD}/escape.png`,
+    `card-media/${CARD}/missing.png`,
+    `card-media/${CARD}`,
+    "card-media/not-a-card/roadmap.png",
+    `/card-media/${CARD}/roadmap.png`,
+  ])("returns 404 for %s", async (relPath) => {
+    const { image } = await cardMediaSetup();
+    const response = await image(relPath);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "Image not found." });
+  });
+
+  it("refuses an absolute path to a real image, and asks for a path when none is given", async () => {
+    const { host, image, outside } = await cardMediaSetup();
+    expect((await image(path.join(outside, "secret.png"))).status).toBe(404);
+    expect((await host.harness.behavior.fetchHttp("GET", CARD_MEDIA_PATH)).status).toBe(400);
   });
 });

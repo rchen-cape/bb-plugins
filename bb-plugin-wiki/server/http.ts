@@ -2,10 +2,11 @@ import { open, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { ASSETS_DIR, WIKI_META_DIR, contentTypeOf, mediaKindOf } from "../lib/wiki.js";
 import type { WikiContext } from "./context.js";
-import { MediaError, saveUpload, type MediaErrorCode } from "./media.js";
+import { MediaError, cardMediaFile, saveUpload, type MediaErrorCode } from "./media.js";
 import { safeSegments } from "./vault.js";
 
 export const ASSET_PATH = "/asset";
+export const CARD_MEDIA_PATH = "/card-media";
 export const UPLOAD_PATH = "/upload";
 
 const CHUNK_BYTES = 1024 * 1024;
@@ -136,13 +137,28 @@ function jsonError(status: number, error: string): Response {
   return Response.json({ error }, { status, headers: { "X-Content-Type-Options": "nosniff" } });
 }
 
-export async function serveAsset(ctx: WikiContext, relPath: string | undefined, rangeHeader: string | undefined): Promise<Response> {
-  if (relPath === undefined || relPath === "") return jsonError(400, "Pass the asset as ?path=assets/<file>.");
-  const found = await servableFile(ctx, relPath).catch((error: unknown) => {
+function unservable(ctx: WikiContext, relPath: string): (error: unknown) => null {
+  return (error) => {
     ctx.log.debug(`Wiki could not serve ${relPath}: ${error instanceof Error ? error.message : String(error)}`);
     return null;
-  });
+  };
+}
+
+export async function serveAsset(ctx: WikiContext, relPath: string | undefined, rangeHeader: string | undefined): Promise<Response> {
+  if (relPath === undefined || relPath === "") return jsonError(400, "Pass the asset as ?path=assets/<file>.");
+  const found = await servableFile(ctx, relPath).catch(unservable(ctx, relPath));
   if (found === null) return jsonError(404, "Asset not found.");
+  return fileResponse(found, relPath, rangeHeader);
+}
+
+export async function serveCardMedia(ctx: WikiContext, relPath: string | undefined, rangeHeader: string | undefined): Promise<Response> {
+  if (relPath === undefined || relPath === "") return jsonError(400, "Pass the image as ?path=card-media/<card id>/<file>.");
+  const found = await cardMediaFile(ctx, relPath).catch(unservable(ctx, relPath));
+  if (found === null) return jsonError(404, "Image not found.");
+  return fileResponse(found, relPath, rangeHeader);
+}
+
+async function fileResponse(found: { file: string; size: number }, relPath: string, rangeHeader: string | undefined): Promise<Response> {
   const range = parseRange(rangeHeader, found.size);
   if (range.kind === "unsatisfiable") {
     return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${found.size}`, "Accept-Ranges": "bytes" } });
@@ -180,6 +196,7 @@ export async function receiveUpload(
 
 export function registerHttp(ctx: WikiContext, options: HttpOptions = {}): void {
   ctx.bb.http.route("GET", ASSET_PATH, (c) => serveAsset(ctx, c.req.query("path"), c.req.header("range")), { auth: "local" });
+  ctx.bb.http.route("GET", CARD_MEDIA_PATH, (c) => serveCardMedia(ctx, c.req.query("path"), c.req.header("range")), { auth: "local" });
   ctx.bb.http.route(
     "POST",
     UPLOAD_PATH,

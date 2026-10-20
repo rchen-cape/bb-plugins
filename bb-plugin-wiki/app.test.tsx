@@ -430,6 +430,80 @@ describe("Inbox", () => {
   });
 });
 
+describe("upload cards", () => {
+  const ID = "card_00000009";
+  const IMAGE = `card-media/${ID}/roadmap.png`;
+
+  function uploadCard(lines: string[], threadId: string | null = null): Card {
+    return {
+      ...card(ID, "unused"),
+      source: { kind: "upload", name: "Roadmap.png", pluginId: "sketch", threadId },
+      text: lines.join("\n"),
+      lines,
+      tags: [],
+      rule: "picked",
+      reason: "Sent from Sketch; review before adding.",
+    };
+  }
+
+  async function renderUpload(only: Card) {
+    const app = await load();
+    return renderSlot(app.navPanels[0]!, { subPath: "inbox" }, {
+      pluginId: "wiki",
+      rpc: {
+        docs: () => DOCS,
+        status: () => STATUS,
+        search: () => NO_RESULTS,
+        inbox: () => [only],
+        previewCard: () => ({ previews: [], missingImages: [IMAGE] }),
+      },
+    });
+  }
+
+  it("shows where the card came from, its image as a thumbnail, and its name in the list", async () => {
+    const slot = await renderUpload(uploadCard([`![Q3 plan](${IMAGE})`]));
+    const lines = await slot.findByRole("list", { name: "Note lines" });
+    const image = within(lines).getByRole("img", { name: "Q3 plan" });
+    expect(image.getAttribute("src")).toBe(`/api/v1/plugins/wiki/http/card-media?path=${encodeURIComponent(IMAGE)}`);
+    expect(within(lines).queryByText(/card-media/)).toBeNull();
+    const article = slot.getByRole("article", { name: "Inbox card" });
+    expect(within(article).getByText("From Sketch")).toBeTruthy();
+    expect(within(article).getByText("· Roadmap.png")).toBeTruthy();
+    expect(slot.queryByText("Written by an agent")).toBeNull();
+    expect(slot.queryByText("Sent by an agent")).toBeNull();
+    const badge = within(article).getByText("picked when sent");
+    expect(badge.getAttribute("title")).toBe("The doc was picked when this was sent, not matched from a [[link]] or @tag. Check it before adding.");
+    expect(within(article).queryByText("explicit [[link]]")).toBeNull();
+    const row = within(slot.getByRole("list", { name: "Open cards" })).getByRole("button");
+    expect(row.textContent).toContain("From Sketch");
+    expect(row.textContent).toContain("picked when sent");
+    expect(row.textContent).toContain("Roadmap.png");
+    expect(row.textContent).not.toContain("![");
+    await act(async () => {
+      fireEvent.click(slot.getByRole("button", { name: "Preview change" }));
+    });
+    expect(await slot.findByText(/Image missing from the Wiki's data folder/)).toBeTruthy();
+  });
+
+  it("lists a card with a note by its first line of text", async () => {
+    const slot = await renderUpload(uploadCard(["Q3 roadmap draft", "", `![](${IMAGE})`]));
+    const row = within(await slot.findByRole("list", { name: "Open cards" })).getByRole("button");
+    expect(row.textContent).toContain("Q3 roadmap draft");
+    expect(row.textContent).not.toContain("Roadmap.png");
+    const lines = slot.getByRole("list", { name: "Note lines" });
+    expect(within(lines).getByText("Q3 roadmap draft")).toBeTruthy();
+    expect(within(lines).getByRole("img", { name: "Image" }).getAttribute("src")).toContain("card-media");
+  });
+
+  it("marks a card an agent sent from a thread", async () => {
+    const slot = await renderUpload(uploadCard([`![Q3 plan](${IMAGE})`], "thr_agent"));
+    const article = await slot.findByRole("article", { name: "Inbox card" });
+    expect(within(article).getByText("Sent by an agent")).toBeTruthy();
+    expect(within(article).getByText("From Sketch")).toBeTruthy();
+    expect(within(article).queryByText("Written by an agent")).toBeNull();
+  });
+});
+
 describe("DocView", () => {
   const DETAIL: DocDetail = {
     ...DOCS[0]!,

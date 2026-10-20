@@ -10,7 +10,7 @@ import { CHANGED_CHANNEL, INBOX_CHANNEL } from "./lib/wiki";
 import plugin from "./server";
 import { DESCRIPTION_TOOL, ROUTES_TOOL } from "./server/routing";
 import { statusOf, withoutTitleLine } from "./server/rpc";
-import { createWikiContext } from "./server/context";
+import { createWikiContext, pluginDataDir } from "./server/context";
 import { tagsJson } from "./server/vault";
 import { ADD_TOOL, GET_TOOL, SEARCH_TOOL } from "./server/tools";
 
@@ -443,6 +443,92 @@ describe("rpc", () => {
     const videoId = await uploadFile("clip.mp4", "mp4");
     await expect(rpc("describeImage", { from: { kind: "upload", uploadId: videoId } })).rejects.toThrow("clip.mp4 is not an image");
     await expect(rpc("job", { jobId: "job_00000000" })).rejects.toThrow("No Wiki job job_00000000.");
+  });
+});
+
+describe("inbox cards from other plugins", () => {
+  const SKETCH = { experimental_caller: { kind: "plugin", pluginId: "sketch" } } as const;
+
+  it("files a plugin's image as a pending card that outlives its upload, then accepts it into assets", async () => {
+    const { wiki, host, harness, rpc, read, uploadFile } = await setup({ gitHistory: true });
+    const before = await snapshot(wiki);
+    const uploadId = await uploadFile("Roadmap.png", "png-bytes");
+    const input = {
+      name: "Roadmap.png",
+      text: "Q3 roadmap",
+      media: [{ from: { kind: "upload", uploadId }, caption: "Roadmap" }],
+      target: { kind: "existing", slug: "global-token" },
+      heading: "Limits",
+      threadId: null,
+    };
+    const card = (await rpc("addCard", input, SKETCH)) as Card;
+    expect(card).toMatchObject({
+      status: "pending",
+      source: { kind: "upload", name: "Roadmap.png", pluginId: "sketch" },
+      text: `Q3 roadmap\n\n![Roadmap](card-media/${card.id}/roadmap.png)`,
+      reason: "Sent from Sketch; review before adding.",
+    });
+    expect(await snapshot(wiki)).toEqual(before);
+    expect(harness.inspection.realtimeSignals.map((signal) => signal.channel)).toContain(INBOX_CHANNEL);
+
+    const dataDir = pluginDataDir(host.bb.storage);
+    await rm(path.join(dataDir, "uploads"), { recursive: true, force: true });
+    const thumbnail = await harness.behavior.fetchHttp("GET", `/card-media?path=${encodeURIComponent(`card-media/${card.id}/roadmap.png`)}`);
+    expect(thumbnail.headers.get("content-type")).toBe("image/png");
+    expect(await thumbnail.text()).toBe("png-bytes");
+    expect((await harness.behavior.runCli(["inbox"])).stdout).toContain(`${card.id}\tpending\tupload: Roadmap.png\tQ3 roadmap\tglobal-token › Limits`);
+
+    await rpc("acceptCard", { id: card.id });
+    const [asset] = await readdir(path.join(wiki, "assets"));
+    expect(asset).toMatch(/^roadmap-[0-9a-f]{8}\.png$/);
+    expect(await read("global-token.md")).toMatch(
+      new RegExp(`<!-- wiki:source upload="Roadmap\\.png" added="[\\d-]+" -->\\nQ3 roadmap\\n\\n!\\[Roadmap\\]\\(assets/${asset}\\)\\n$`),
+    );
+    const log = execFileSync("git", ["-C", wiki, "log", "--format=%s"], { encoding: "utf8" }).trim().split("\n");
+    expect(log).toEqual(["Wiki: Q3 roadmap → Global token"]);
+    const gone = await harness.behavior.fetchHttp("GET", `/card-media?path=${encodeURIComponent(`card-media/${card.id}/roadmap.png`)}`);
+    expect(gone.status).toBe(404);
+  });
+
+  it("marks cards from the app or CLI as plain uploads and checks the input", async () => {
+    const { wiki, harness, rpc, openCards } = await setup();
+    const files = await tempDir("wiki-add-card-");
+    await writeFile(path.join(files, "board.png"), "png");
+    await writeFile(path.join(files, "demo.mp4"), "mp4");
+    const image = (file: string) => [{ from: { kind: "path", path: path.join(files, file) }, caption: "" }];
+    const base = { name: "board.png", text: "", media: image("board.png"), target: null, heading: null, threadId: null };
+    const card = (await rpc("addCard", base)) as Card;
+    expect(card.source).toEqual({ kind: "upload", name: "board.png", pluginId: null, threadId: null });
+    expect(card.destinations[0]).toMatchObject({ include: false, target: { kind: "new", title: "board" } });
+    expect((await harness.behavior.runCli(["inbox"])).stdout).toBe(`${card.id}\tpending\tupload: board.png\tboard.png\tno destination\n`);
+    const before = await snapshot(wiki);
+    await expect(rpc("addCard", { name: "board.png", text: "", media: image("board.png"), target: null, heading: null })).rejects.toThrow();
+    await expect(rpc("addCard", { ...base, threadId: "" })).rejects.toThrow();
+    await expect(rpc("addCard", { ...base, source: { kind: "upload", name: "x", pluginId: "spoof" } }, SKETCH)).rejects.toThrow();
+    await expect(rpc("addCard", { ...base, media: [] })).rejects.toThrow("Nothing to add");
+    await expect(rpc("addCard", { ...base, media: image("demo.mp4") })).rejects.toThrow("demo.mp4 is a video");
+    await expect(rpc("addCard", { ...base, target: { kind: "existing", slug: "missing" } })).rejects.toThrow('there is no Wiki doc with slug "missing"');
+    expect(await openCards()).toEqual([card]);
+    expect(await snapshot(wiki)).toEqual(before);
+  });
+
+  it("lets only the user accept a card an agent sent from a thread", async () => {
+    const { wiki, harness, rpc, read } = await setup();
+    const files = await tempDir("wiki-thread-card-");
+    await writeFile(path.join(files, "board.png"), "png");
+    const media = [{ from: { kind: "path", path: path.join(files, "board.png") }, caption: "Board" }];
+    const base = { name: "board.png", text: "Agent note.", media, target: { kind: "existing", slug: "global-token" }, heading: "Limits" };
+    const sent = (await rpc("addCard", { ...base, threadId: "thr_agent" }, SKETCH)) as Card;
+    expect(sent.source).toEqual({ kind: "upload", name: "board.png", pluginId: "sketch", threadId: "thr_agent" });
+    const before = await snapshot(wiki);
+    const refused = await harness.behavior.runCli(["accept", sent.id], { threadId: "thr_agent" });
+    expect(refused.exitCode).not.toBe(0);
+    expect(refused.stderr).toContain(`${sent.id} was sent by an agent; only the user can accept it.`);
+    expect(await snapshot(wiki)).toEqual(before);
+    expect((await harness.behavior.runCli(["accept", sent.id])).exitCode).toBe(0);
+    expect(await read("global-token.md")).toContain("Agent note.");
+    const mine = (await rpc("addCard", { ...base, threadId: null }, SKETCH)) as Card;
+    expect((await harness.behavior.runCli(["accept", mine.id], { threadId: "thr_agent" })).exitCode).toBe(0);
   });
 });
 

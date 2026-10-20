@@ -105,12 +105,18 @@ export const cardSourceSchema = z.discriminatedUnion("kind", [
     section: z.string().max(LIMITS.heading * 4).optional(),
   }),
   z.object({ kind: z.literal("agent"), threadId: z.string(), threadTitle: z.string().nullable() }),
+  z.object({
+    kind: z.literal("upload"),
+    name: z.string(),
+    pluginId: z.string().nullable(),
+    threadId: z.string().min(1).nullable().default(null),
+  }),
 ]);
 export type CardSource = z.infer<typeof cardSourceSchema>;
 
 export const cardStatusSchema = z.enum(["routing", "pending", "accepted", "skipped"]);
 export type CardStatus = z.infer<typeof cardStatusSchema>;
-export const cardRuleSchema = z.enum(["explicit-link", "tag", "agent", "none"]);
+export const cardRuleSchema = z.enum(["explicit-link", "tag", "agent", "picked", "none"]);
 export type CardRule = z.infer<typeof cardRuleSchema>;
 
 export const tagSuggestionSchema = z.object({
@@ -253,6 +259,19 @@ export const rpcContract = defineRpcContract({
       })
       .strict(),
     output: z.object({ slug: z.string(), title: z.string() }),
+  },
+  addCard: {
+    input: z
+      .object({
+        name: titleSchema,
+        text: z.string().max(LIMITS.text),
+        media: z.array(mediaItemSchema).max(LIMITS.media),
+        target: docTargetSchema.nullable(),
+        heading: headingSchema.nullable(),
+        threadId: z.string().min(1).nullable(),
+      })
+      .strict(),
+    output: cardSchema,
   },
   inbox: {
     input: z.object({ status: z.enum(["open", "accepted", "skipped"]) }).strict(),

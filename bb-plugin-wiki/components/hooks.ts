@@ -139,3 +139,7 @@ export function useWikiStatus() {
 export function assetUrl(pluginId: string, relPath: string): string {
   return `/api/v1/plugins/${pluginId}/http/asset?path=${encodeURIComponent(relPath)}`;
 }
+
+export function cardMediaUrl(pluginId: string, relPath: string): string {
+  return `/api/v1/plugins/${pluginId}/http/card-media?path=${encodeURIComponent(relPath)}`;
+}

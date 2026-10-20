@@ -10,12 +10,15 @@ import {
   type Card,
   type CardPreview,
   type CardRule,
+  type CardSource,
   type Destination,
   type DocTarget,
   type LineSelection,
+  type MediaItem,
   type RememberAlias,
   type TagSuggestion,
 } from "../contract.js";
+import { isCardMediaTarget, parseCardMediaLine, pluginTitle } from "../lib/card-media.js";
 import { SKIP_TAG, formatNoteDateShort, type NoteLink, type NoteUnit } from "../lib/daily-notes.js";
 import { matchTag, type FuzzyCandidate } from "../lib/fuzzy.js";
 import {
@@ -38,8 +41,9 @@ import {
   type DocType,
 } from "../lib/wiki.js";
 import type { WikiContext } from "./context.js";
+import { cardImagesFrom, findCardImage, removeCardImages, saveCardImages } from "./media.js";
 import type { CardPatch, NewCard } from "./store.js";
-import { docRelPath } from "./vault.js";
+import { docRelPath, plannedAssetPath } from "./vault.js";
 import { appendToTarget, sourceBlock, todayIso, type AppendResult } from "./write.js";
 
 export const FALLBACK_REASON = "Claude Code routing was unavailable; routed by tag only.";
@@ -80,6 +84,16 @@ export interface AgentCardInput {
   title: string | null;
 }
 
+export interface UploadCardInput {
+  name: string;
+  text: string;
+  media: readonly MediaItem[];
+  target: DocTarget | null;
+  heading: string | null;
+  pluginId: string | null;
+  threadId: string | null;
+}
+
 export interface RouteDestination {
   target: DocTarget;
   heading: string;
@@ -98,6 +112,8 @@ export interface CardRoutes {
 }
 
 type DestinationDraft = Omit<Destination, "id">;
+type ImageSource = Exclude<CardSource, { kind: "agent" }>;
+type ImageFinder = (target: string) => Promise<string | null>;
 
 interface Routing {
   rule: CardRule;
@@ -426,12 +442,16 @@ function agentDestination(ctx: WikiContext, input: AgentCardInput): { rule: Card
   };
 }
 
+function assertNoSourceMarker(text: string, label: string): void {
+  if (SOURCE_MARKER.test(text)) {
+    throw new Error(`${label} has a Wiki source marker line (<!-- wiki:source … -->); remove it, because the Wiki records where text came from itself.`);
+  }
+}
+
 function agentText(raw: string): string {
   const text = raw.replace(/\r\n?/g, "\n");
   if (text.trim() === "") throw new Error("Give the text to add to the Wiki.");
-  if (SOURCE_MARKER.test(text)) {
-    throw new Error("The text has a Wiki source marker line (<!-- wiki:source … -->); remove it, because the Wiki records where text came from itself.");
-  }
+  assertNoSourceMarker(text, "The text");
   return text;
 }
 
@@ -450,6 +470,101 @@ export async function createAgentCard(ctx: WikiContext, input: AgentCardInput): 
     tagSuggestions: [],
     rememberAliases: [],
   });
+  ctx.publishInbox();
+  return card;
+}
+
+function uploadText(raw: string): string {
+  return raw.replace(/\r\n?/g, "\n").replace(/^(?:[ \t]*\n)+/, "").trimEnd();
+}
+
+function uploadSender(input: UploadCardInput): string | null {
+  return input.pluginId === null ? null : pluginTitle(input.pluginId);
+}
+
+function nameTitle(name: string): string {
+  return name.replace(/\.[A-Za-z0-9]{1,10}$/, "");
+}
+
+function unplacedUpload(input: UploadCardInput, heading: string | null): DestinationDraft {
+  return {
+    include: false,
+    target: newTarget(nameTitle(input.name), DEFAULT_DOC_TYPE),
+    heading: clampHeading(heading ?? NEW_DOC_HEADING),
+    lineRanges: "all",
+    role: "content",
+    reason: "No doc was chosen; pick one or turn this on.",
+  };
+}
+
+function uploadDestination(ctx: WikiContext, input: UploadCardInput): { rule: CardRule; destination: DestinationDraft } {
+  const heading = blankToNull(input.heading);
+  if (input.target === null) return { rule: "none", destination: unplacedUpload(input, heading) };
+  const target = routeTarget(ctx, input.target, "The chosen doc");
+  return {
+    rule: "picked",
+    destination: {
+      include: true,
+      target,
+      heading: clampHeading(heading ?? (target.kind === "existing" ? DEFAULT_HEADING : NEW_DOC_HEADING)),
+      lineRanges: "all",
+      role: "content",
+      reason: clampReason(pickedReason(input)),
+    },
+  };
+}
+
+function pickedReason(input: UploadCardInput): string {
+  const sender = uploadSender(input);
+  const by = input.threadId === null ? "" : " by an agent";
+  return `Chosen${by}${sender === null ? "" : ` in ${sender}`} when it was sent.`;
+}
+
+function uploadReason(input: UploadCardInput): string {
+  const sender = uploadSender(input);
+  const sent = sender === null ? "Sent as an upload" : `Sent from ${sender}`;
+  return `${sent}${input.threadId === null ? "" : " by an agent in a thread"}; review before adding.`;
+}
+
+function checkedUploadText(input: UploadCardInput): string {
+  const text = uploadText(input.text);
+  assertNoSourceMarker(text, "The text");
+  for (const item of input.media) assertNoSourceMarker(item.caption, "A caption");
+  if (text === "" && input.media.length === 0) throw new Error("Nothing to add: the text is empty and no image was chosen.");
+  return text;
+}
+
+function uploadCard(input: UploadCardInput, body: string, routed: { rule: CardRule; destination: DestinationDraft }): NewCard {
+  return {
+    status: "pending",
+    source: { kind: "upload", name: input.name, pluginId: input.pluginId, threadId: input.threadId },
+    text: body,
+    lines: body.split("\n"),
+    tags: [],
+    rule: routed.rule,
+    reason: clampReason(uploadReason(input)),
+    destinations: assignIds([routed.destination]),
+    tagSuggestions: [],
+    rememberAliases: [],
+  };
+}
+
+async function storeUploadCard(ctx: WikiContext, cardId: string, input: NewCard): Promise<Card> {
+  try {
+    return ctx.store.createCard(input, cardId);
+  } catch (error) {
+    await removeCardImages(ctx, cardId);
+    throw error;
+  }
+}
+
+export async function createUploadCard(ctx: WikiContext, input: UploadCardInput): Promise<Card> {
+  const text = checkedUploadText(input);
+  const routed = uploadDestination(ctx, input);
+  const images = await cardImagesFrom(ctx, input.media);
+  const saved = await saveCardImages(ctx, () => ctx.store.newCardId(), images);
+  const body = [text, ...saved.embeds].filter((part) => part !== "").join("\n\n");
+  const card = await storeUploadCard(ctx, saved.cardId, uploadCard(input, body, routed));
   ctx.publishInbox();
   return card;
 }
@@ -710,6 +825,7 @@ function markerFor(card: Card, added: string): SourceMarker {
     const noteDate = card.source.origin === "file" ? "" : card.source.noteDate;
     return { kind: "notes", notePath: card.source.notePath, noteDate, added };
   }
+  if (card.source.kind === "upload") return { kind: "upload", name: card.source.name, added };
   return { kind: "agent", threadId: card.source.threadId, title: card.source.threadTitle, added };
 }
 
@@ -759,24 +875,36 @@ async function findNoteImage(realNotesRoot: string, notesRoot: string, notePath:
   return null;
 }
 
-async function resolveNoteImages(ctx: WikiContext, card: Card, texts: readonly string[]): Promise<NoteImages> {
-  const images: NoteImages = { found: new Map(), missing: [] };
-  if (card.source.kind !== "notes") return images;
+function imageTargets(source: ImageSource, texts: readonly string[]): string[] {
   const targets = [...new Set(texts.flatMap((text) => extractImageTargets(text)))].filter((target) => mediaKindOf(target) === "image");
-  if (targets.length === 0) return images;
+  return source.kind === "upload" ? targets.filter(isCardMediaTarget) : targets;
+}
+
+async function imageFinder(ctx: WikiContext, cardId: string, source: ImageSource): Promise<ImageFinder> {
+  if (source.kind === "upload") return (target) => findCardImage(ctx, cardId, target);
+  const { notePath } = source;
   const notesRoot = await ctx.notesRoot();
   const realNotesRoot = await realOrNull(notesRoot);
+  return async (target) => (realNotesRoot === null ? null : findNoteImage(realNotesRoot, notesRoot, notePath, target));
+}
+
+async function resolveImages(ctx: WikiContext, card: Card, texts: readonly string[]): Promise<NoteImages> {
+  const images: NoteImages = { found: new Map(), missing: [] };
+  if (card.source.kind === "agent") return images;
+  const targets = imageTargets(card.source, texts);
+  if (targets.length === 0) return images;
+  const find = await imageFinder(ctx, card.id, card.source);
   for (const target of targets) {
-    const source = realNotesRoot === null ? null : await findNoteImage(realNotesRoot, notesRoot, card.source.notePath, target);
+    const source = await find(target);
     if (source === null) images.missing.push(target);
     else images.found.set(target, source);
   }
   return images;
 }
 
-async function copyNoteImages(ctx: WikiContext, card: Card, texts: readonly string[]): Promise<CopiedImages> {
+async function copyImages(ctx: WikiContext, card: Card, texts: readonly string[]): Promise<CopiedImages> {
   const copied: CopiedImages = { map: new Map(), paths: [] };
-  const { found } = await resolveNoteImages(ctx, card, texts);
+  const { found } = await resolveImages(ctx, card, texts);
   for (const [target, source] of found) {
     const { relPath } = await ctx.vault.copyAsset(source);
     copied.map.set(target, relPath);
@@ -785,15 +913,39 @@ async function copyNoteImages(ctx: WikiContext, card: Card, texts: readonly stri
   return copied;
 }
 
+async function plannedImages(ctx: WikiContext, card: Card, texts: readonly string[]): Promise<CopiedImages> {
+  const planned: CopiedImages = { map: new Map(), paths: [] };
+  if (card.source.kind !== "upload") return planned;
+  const { found } = await resolveImages(ctx, card, texts);
+  for (const [target, source] of found) planned.map.set(target, await plannedAssetPath(source));
+  return planned;
+}
+
+async function assertCardImages(ctx: WikiContext, plan: WritePlan): Promise<void> {
+  if (plan.card.source.kind !== "upload") return;
+  const { missing } = await resolveImages(ctx, plan.card, plan.writes.map((write) => write.text));
+  if (missing.length === 0) return;
+  const one = missing.length === 1;
+  throw new Error(
+    `The ${one ? "image" : "images"} ${listText(missing)} ${one ? "is" : "are"} gone from the Wiki's data folder, so nothing was added. Skip this card and send ${one ? "it" : "them"} again.`,
+  );
+}
+
 function withImages(text: string, images: CopiedImages): string {
   if (images.map.size === 0) return text;
   return rewriteImageTargets(text, (target) => images.map.get(target) ?? null);
 }
 
+function commitSubject(card: Card): string {
+  if (card.source.kind !== "upload") return card.text;
+  const text = card.lines.filter((line) => parseCardMediaLine(line, card.id) === null).join("\n");
+  return text.trim() === "" ? card.source.name : text;
+}
+
 function commitMessage(card: Card, titles: readonly string[], complete: boolean): string {
   const unique = [...new Set(titles)];
   const destinations = unique.length === 0 ? "" : ` → ${unique.join(", ")}`;
-  return `Wiki: ${truncate(collapse(card.text), COMMIT_TEXT_LIMIT)}${destinations}${complete ? "" : " (incomplete)"}`;
+  return `Wiki: ${truncate(collapse(commitSubject(card)), COMMIT_TEXT_LIMIT)}${destinations}${complete ? "" : " (incomplete)"}`;
 }
 
 function sha256Hex(text: string): string {
@@ -874,7 +1026,7 @@ async function writePlan(ctx: WikiContext, plan: WritePlan, progress: AcceptProg
   const added = await todayIso(ctx);
   const marker = markerFor(card, added);
   const earlier = writtenContent(ctx, card);
-  const images = await copyNoteImages(ctx, card, plan.writes.map((write) => write.text));
+  const images = await copyImages(ctx, card, plan.writes.map((write) => write.text));
   for (const relPath of images.paths) progress.touched.add(relPath);
   for (const write of plan.writes) {
     const block = sourceBlock(marker, withImages(write.text, images));
@@ -895,6 +1047,7 @@ async function commitProgress(ctx: WikiContext, card: Card, progress: AcceptProg
 async function writeCard(ctx: WikiContext, plan: WritePlan, progress: AcceptProgress): Promise<void> {
   try {
     await assertReadable(ctx, plan);
+    await assertCardImages(ctx, plan);
     await writePlan(ctx, plan, progress);
   } catch (error) {
     await commitProgress(ctx, plan.card, progress, false);
@@ -905,6 +1058,15 @@ async function writeCard(ctx: WikiContext, plan: WritePlan, progress: AcceptProg
 function publishProgress(ctx: WikiContext, progress: AcceptProgress): void {
   if (progress.touched.size > 0) ctx.publishChanged();
   if (progress.touched.size > 0 || progress.cardChanged) ctx.publishInbox();
+}
+
+async function dropCardMedia(ctx: WikiContext, card: Card): Promise<void> {
+  if (card.source.kind !== "upload") return;
+  try {
+    await removeCardImages(ctx, card.id);
+  } catch (error) {
+    ctx.log.warn(`Wiki kept the images of accepted card ${card.id}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 export async function acceptCard(ctx: WikiContext, id: string): Promise<Card> {
@@ -920,6 +1082,7 @@ export async function acceptCard(ctx: WikiContext, id: string): Promise<Card> {
       progress.cardChanged = true;
       if (card.source.kind === "notes") ctx.store.setUnitStatus(card.source.unitHash, "accepted");
       await commitProgress(ctx, card, progress, true);
+      await dropCardMedia(ctx, card);
       return updated;
     });
   } finally {
@@ -998,7 +1161,8 @@ export async function previewCard(ctx: WikiContext, id: string): Promise<CardPre
     });
     states.set(key, { path: state.path, content: after });
   };
-  for (const destination of content) await preview(destination, contentText(card, destination));
+  const images = await plannedImages(ctx, card, content.map((destination) => contentText(card, destination)));
+  for (const destination of content) await preview(destination, withImages(contentText(card, destination), images));
   const written = [
     ...writtenContent(ctx, card),
     ...content.map((destination) => ({
@@ -1019,5 +1183,5 @@ export async function missingCardImages(ctx: WikiContext, id: string): Promise<s
     const text = dedent(selectedLines(card, destination.lineRanges)).join("\n");
     return text.trim() === "" ? [] : [text];
   });
-  return (await resolveNoteImages(ctx, card, texts)).missing;
+  return (await resolveImages(ctx, card, texts)).missing;
 }

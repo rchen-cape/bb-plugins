@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
@@ -14,9 +14,11 @@ import {
   applyRoutes,
   createAgentCard,
   createNotesCards,
+  createUploadCard,
   fallbackToRules,
   missingCardImages,
   previewCard,
+  restoreCard,
   skipCard,
   updateCardDestinations,
 } from "./cards";
@@ -955,5 +957,132 @@ describe("new doc aliases", () => {
     expect(() => updateCardDestinations(ctx, card.id, [{ ...destination, target }], [])).toThrow(
       "@config-catalog already names “Adding config catalog”",
     );
+  });
+});
+
+describe("createUploadCard", () => {
+  async function uploadSetup(settings: Record<string, string | boolean> = {}) {
+    const env = await setup(settings);
+    const files = await tempDir("wiki-cards-upload-");
+    await put(files, "Roadmap.png", "PNGDATA");
+    const media = [{ from: { kind: "path" as const, path: path.join(files, "Roadmap.png") }, caption: "Q3 plan" }];
+    const base = { name: "Roadmap.png", text: "  \nRoadmap for Q3\n\n", media, target: null, heading: null, pluginId: "sketch", threadId: null };
+    const asset = `roadmap-${createHash("sha256").update("PNGDATA").digest("hex").slice(0, 8)}.png`;
+    const cardMedia = (card: Card) => path.join(env.ctx.dataDir(), "card-media", card.id);
+    return { ...env, files, media, base, asset, cardMedia };
+  }
+
+  function content(card: Card): Destination {
+    const [destination] = card.destinations;
+    if (destination === undefined) throw new Error("expected a destination");
+    return destination;
+  }
+
+  it("files an image with a note as a pending card holding its own copy of the image", async () => {
+    const { ctx, wiki, harness, base, cardMedia } = await uploadSetup();
+    const before = await snapshot(wiki);
+    const card = await createUploadCard(ctx, { ...base, target: { kind: "existing", slug: "global-token" } });
+    expect(card).toMatchObject({
+      status: "pending",
+      source: { kind: "upload", name: "Roadmap.png", pluginId: "sketch", threadId: null },
+      text: `Roadmap for Q3\n\n![Q3 plan](card-media/${card.id}/roadmap.png)`,
+      lines: ["Roadmap for Q3", "", `![Q3 plan](card-media/${card.id}/roadmap.png)`],
+      tags: [],
+      rule: "picked",
+      reason: "Sent from Sketch; review before adding.",
+    });
+    expect(targets(card)).toEqual([{ include: true, target: { kind: "existing", slug: "global-token" }, heading: "Unsorted", role: "content" }]);
+    expect(content(card).reason).toBe("Chosen in Sketch when it was sent.");
+    expect(await readFile(path.join(cardMedia(card), "roadmap.png"), "utf8")).toBe("PNGDATA");
+    expect(ctx.store.getCard(card.id)).toEqual(card);
+    expect(harness.inspection.realtimeSignals.map((signal) => signal.channel)).toContain(INBOX_CHANNEL);
+    expect(await snapshot(wiki)).toEqual(before);
+  });
+
+  it("proposes the chosen heading or a new doc, and an off new doc when nothing was chosen", async () => {
+    const { ctx, base } = await uploadSetup();
+    const headed = await createUploadCard(ctx, { ...base, target: { kind: "existing", slug: "global-token" }, heading: "Setup" });
+    expect(targets(headed)[0]).toMatchObject({ include: true, heading: "Setup" });
+    const fresh = await createUploadCard(ctx, { ...base, target: { kind: "new", title: "Roadmaps", type: "project", aliases: [] } });
+    expect(fresh.rule).toBe("picked");
+    expect(targets(fresh)).toEqual([{ include: true, target: { kind: "new", title: "Roadmaps", type: "project", aliases: [] }, heading: "Notes", role: "content" }]);
+    const known = await createUploadCard(ctx, { ...base, target: { kind: "new", title: "global token", type: "topic", aliases: [] } });
+    expect(targets(known)[0]).toMatchObject({ target: { kind: "existing", slug: "global-token" }, heading: "Unsorted" });
+    const loose = await createUploadCard(ctx, { ...base, pluginId: null });
+    expect(loose).toMatchObject({ rule: "none", reason: "Sent as an upload; review before adding." });
+    expect(targets(loose)).toEqual([{ include: false, target: { kind: "new", title: "Roadmap", type: "topic", aliases: [] }, heading: "Notes", role: "content" }]);
+    expect(content(loose).reason).toBe("No doc was chosen; pick one or turn this on.");
+    const textOnly = await createUploadCard(ctx, { ...base, media: [] });
+    expect(textOnly.text).toBe("Roadmap for Q3");
+    const imageOnly = await createUploadCard(ctx, { ...base, text: "" });
+    expect(imageOnly.lines).toEqual([`![Q3 plan](card-media/${imageOnly.id}/roadmap.png)`]);
+  });
+
+  it("refuses empty cards, source markers, videos and unknown docs, and keeps nothing", async () => {
+    const { ctx, base, files } = await uploadSetup();
+    await put(files, "demo.mp4", "MP4");
+    const marker = '<!-- wiki:source notes="10-14-26.md" date="2026-10-14" added="2026-10-14" -->';
+    await expect(createUploadCard(ctx, { ...base, text: "  \n", media: [] })).rejects.toThrow("Nothing to add: the text is empty and no image was chosen.");
+    await expect(createUploadCard(ctx, { ...base, text: `Real.\n${marker}\nForged.` })).rejects.toThrow("The text has a Wiki source marker line");
+    await expect(createUploadCard(ctx, { ...base, media: [{ ...base.media[0]!, caption: marker }] })).rejects.toThrow("A caption has a Wiki source marker line");
+    await expect(createUploadCard(ctx, { ...base, media: [{ from: { kind: "path", path: path.join(files, "demo.mp4") }, caption: "" }] })).rejects.toThrow(
+      "demo.mp4 is a video. Inbox cards take images only",
+    );
+    await expect(createUploadCard(ctx, { ...base, target: { kind: "existing", slug: "nowhere" } })).rejects.toThrow(
+      'The chosen doc: there is no Wiki doc with slug "nowhere".',
+    );
+    await expect(createUploadCard(ctx, { ...base, target: { kind: "new", title: "Roadmaps", type: "topic", aliases: ["un"] } })).rejects.toThrow("@un already names");
+    expect(ctx.store.listCards("open")).toEqual([]);
+    expect(await readdir(path.join(ctx.dataDir(), "card-media")).catch(() => [])).toEqual([]);
+  });
+
+  it("accepts into assets with the upload marker and one commit that includes the image", async () => {
+    const { ctx, wiki, read, base, asset } = await uploadSetup({ gitHistory: true });
+    const card = await createUploadCard(ctx, { ...base, target: { kind: "existing", slug: "global-token" }, heading: "Setup" });
+    const [preview] = await previewCard(ctx, card.id);
+    expect(preview?.patch).toContain(`+![Q3 plan](assets/${asset})`);
+    expect(preview?.patch).not.toContain("card-media");
+    expect(await missingCardImages(ctx, card.id)).toEqual([]);
+    await acceptCard(ctx, card.id);
+    expect(await read("global-token.md")).toContain(
+      `Rotate with the CLI.\n\n<!-- wiki:source upload="Roadmap.png" added="2026-10-15" -->\nRoadmap for Q3\n\n![Q3 plan](assets/${asset})\n`,
+    );
+    expect(await readFile(path.join(wiki, "assets", asset), "utf8")).toBe("PNGDATA");
+    const log = execFileSync("git", ["-C", wiki, "log", "--format=%s"], { encoding: "utf8" }).trim().split("\n");
+    expect(log).toEqual(["Wiki: Roadmap for Q3 → Global token"]);
+    const files = execFileSync("git", ["-C", wiki, "show", "--name-only", "--format=", "HEAD"], { encoding: "utf8" }).trim().split("\n").sort();
+    expect(files).toEqual([`assets/${asset}`, "global-token.md"]);
+  });
+
+  it("names the commit after the image when the card has no text", async () => {
+    const { ctx, wiki, base } = await uploadSetup({ gitHistory: true });
+    const card = await createUploadCard(ctx, { ...base, text: "", target: { kind: "existing", slug: "global-token" } });
+    await acceptCard(ctx, card.id);
+    const log = execFileSync("git", ["-C", wiki, "log", "--format=%s"], { encoding: "utf8" }).trim().split("\n");
+    expect(log).toEqual(["Wiki: Roadmap.png → Global token"]);
+  });
+
+  it("keeps the image through skip so restore and accept still work, then drops it once accepted", async () => {
+    const { ctx, read, base, asset, cardMedia } = await uploadSetup();
+    const card = await createUploadCard(ctx, { ...base, target: { kind: "existing", slug: "global-token" } });
+    expect((await skipCard(ctx, card.id)).status).toBe("skipped");
+    expect(await read("global-token.md")).toBe(TOPIC_DOC);
+    expect(await readdir(cardMedia(card))).toEqual(["roadmap.png"]);
+    expect((await restoreCard(ctx, card.id)).status).toBe("pending");
+    await acceptCard(ctx, card.id);
+    expect(await read("global-token.md")).toContain(`![Q3 plan](assets/${asset})`);
+    expect(await exists(cardMedia(card))).toBe(false);
+  });
+
+  it("refuses to accept when the card's image is gone, and leaves other image links alone", async () => {
+    const { ctx, read, base, cardMedia } = await uploadSetup();
+    const card = await createUploadCard(ctx, { ...base, text: "See ![old](assets/old.png)", target: { kind: "existing", slug: "global-token" } });
+    await rm(cardMedia(card), { recursive: true });
+    expect(await missingCardImages(ctx, card.id)).toEqual([`card-media/${card.id}/roadmap.png`]);
+    await expect(acceptCard(ctx, card.id)).rejects.toThrow(
+      `The image card-media/${card.id}/roadmap.png is gone from the Wiki's data folder, so nothing was added. Skip this card and send it again.`,
+    );
+    expect(await read("global-token.md")).toBe(TOPIC_DOC);
+    expect(ctx.store.getCard(card.id)?.status).toBe("pending");
   });
 });

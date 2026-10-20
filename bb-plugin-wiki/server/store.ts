@@ -849,10 +849,14 @@ function createInbox(db: Db, log: StoreLog) {
     return readCard(statements.get.get(id));
   }
 
+  function newCardId(): string {
+    return freshId("card_", (candidate) => statements.exists.get(candidate) !== undefined);
+  }
+
   return {
-    createCard(input: NewCard): Card {
+    newCardId,
+    createCard(input: NewCard, id: string = newCardId()): Card {
       const now = iso(Date.now());
-      const id = freshId("card_", (candidate) => statements.exists.get(candidate) !== undefined);
       const card = cardSchema.parse({ ...input, id, createdAt: now, updatedAt: now });
       statements.insert.run(cardParams(card));
       return card;

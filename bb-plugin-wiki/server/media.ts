@@ -1,10 +1,14 @@
 import { randomBytes } from "node:crypto";
-import { lstat, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { copyFile, lstat, mkdir, open, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { uploadIdSchema, type MediaSource, type MessageMediaItem, type UploadInfo } from "../contract.js";
+import { cardIdSchema, uploadIdSchema, type MediaItem, type MediaSource, type MessageMediaItem, type UploadInfo } from "../contract.js";
+import { CARD_MEDIA_DIR, cardMediaPath, imageAlt, isOwnCardMedia } from "../lib/card-media.js";
+import { slugify, uniqueSlug } from "../lib/slug.js";
 import { LIMITS, MEDIA_EXTENSIONS, mediaKindOf, type MediaKind } from "../lib/wiki.js";
 import type { WikiContext } from "./context.js";
+import { safeSegments } from "./vault.js";
 
 export const UPLOADS_DIR = "uploads";
 export const UPLOAD_MAX_AGE_MS = 24 * 60 * 60_000;
@@ -14,9 +18,11 @@ const ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 const ID_LENGTH = 12;
 const UPLOAD_ENTRY = /^upl_[a-z0-9]{12}(?:\.[a-z0-9]{1,10})?$/;
 const SIDECAR_EXTENSION = ".json";
+const CARD_ID_ATTEMPTS = 20;
 const TEXT_BYTES = LIMITS.text * 4;
 const MESSAGE_CANDIDATES = 100;
 const EXTENSIONS = MEDIA_EXTENSIONS.map((extension) => extension.slice(1)).join("|");
+const IMAGE_EXTENSIONS = MEDIA_EXTENSIONS.filter((extension) => mediaKindOf(extension) === "image");
 const PATH_STOP = "\\s\"'`<>()[\\]{}|*?\\/";
 const QUOTES = "\"'`";
 const BARE_MEDIA_PATH = new RegExp(
@@ -55,6 +61,22 @@ export interface ResolvedMedia {
 }
 
 export type EmbedKind = "image" | "video";
+
+export interface CardImage {
+  path: string;
+  name: string;
+  caption: string;
+}
+
+export interface SavedCardImages {
+  cardId: string;
+  embeds: string[];
+}
+
+export interface CardMediaFile {
+  file: string;
+  size: number;
+}
 
 type MediaContext = Pick<WikiContext, "dataDir">;
 
@@ -361,10 +383,6 @@ export async function resolveMediaSource(ctx: MediaContext, from: MediaSource): 
   return { path: upload.file, name: upload.name, kind: upload.kind, sizeBytes: upload.sizeBytes };
 }
 
-function altText(caption: string): string {
-  return caption.replace(/\s+/g, " ").trim().replace(/[\\[\]]/g, (char) => `\\${char}`);
-}
-
 function attribute(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -375,7 +393,104 @@ function linkTarget(relPath: string): string {
 
 export function embedFor(relPath: string, kind: EmbedKind, caption: string): string {
   const text = caption.trim();
-  if (kind === "image") return `![${altText(text)}](${linkTarget(relPath)})`;
+  if (kind === "image") return `![${imageAlt(text)}](${linkTarget(relPath)})`;
   const video = `<video controls src="${attribute(relPath)}"></video>`;
   return text === "" ? video : `${video}\n\n${text}`;
+}
+
+export function cardMediaDir(ctx: MediaContext): string {
+  return path.join(ctx.dataDir(), CARD_MEDIA_DIR);
+}
+
+function notAnImage(media: ResolvedMedia): MediaError {
+  const images = IMAGE_EXTENSIONS.join(" ");
+  if (media.kind === "video") {
+    return new MediaError("unsupported", `${media.name} is a video. Inbox cards take images only (${images}); add videos straight to a doc instead.`);
+  }
+  return new MediaError("unsupported", `${media.name} is not an image. Inbox cards take images only (${images}); put text in the card's text instead.`);
+}
+
+export async function cardImagesFrom(ctx: MediaContext, items: readonly MediaItem[]): Promise<CardImage[]> {
+  const images: CardImage[] = [];
+  for (const item of items) {
+    const media = await resolveMediaSource(ctx, item.from);
+    if (media.kind !== "image") throw notAnImage(media);
+    images.push({ path: media.path, name: media.name, caption: item.caption });
+  }
+  return images;
+}
+
+function cardImageFile(name: string, taken: Set<string>): string {
+  const extension = extensionOf(name);
+  const stem = uniqueSlug(slugify(name.slice(0, name.length - extension.length)), (candidate) => taken.has(`${candidate}${extension}`));
+  const file = `${stem}${extension}`;
+  taken.add(file);
+  return file;
+}
+
+async function claimCardFolder(root: string, newId: () => string): Promise<{ cardId: string; folder: string }> {
+  await mkdir(root, { recursive: true });
+  for (let attempt = 0; attempt < CARD_ID_ATTEMPTS; attempt += 1) {
+    const cardId = newId();
+    const folder = path.join(root, cardId);
+    const made = await mkdir(folder).then(
+      () => true,
+      (error: unknown) => {
+        if (errorCode(error) === "EEXIST") return false;
+        throw error;
+      },
+    );
+    if (made) return { cardId, folder };
+  }
+  throw new Error("Could not find a free folder for the card's images; try again.");
+}
+
+async function copyCardImages(cardId: string, folder: string, images: readonly CardImage[]): Promise<string[]> {
+  const taken = new Set<string>();
+  const embeds: string[] = [];
+  for (const image of images) {
+    const file = cardImageFile(image.name, taken);
+    await copyFile(image.path, path.join(folder, file), constants.COPYFILE_EXCL);
+    embeds.push(embedFor(cardMediaPath(cardId, file), "image", image.caption));
+  }
+  return embeds;
+}
+
+export async function saveCardImages(ctx: MediaContext, newId: () => string, images: readonly CardImage[]): Promise<SavedCardImages> {
+  if (images.length === 0) return { cardId: newId(), embeds: [] };
+  const { cardId, folder } = await claimCardFolder(cardMediaDir(ctx), newId);
+  try {
+    return { cardId, embeds: await copyCardImages(cardId, folder, images) };
+  } catch (error) {
+    await rm(folder, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export async function removeCardImages(ctx: MediaContext, cardId: string): Promise<void> {
+  if (!cardIdSchema.safeParse(cardId).success) return;
+  await rm(path.join(cardMediaDir(ctx), cardId), { recursive: true, force: true });
+}
+
+function cardMediaParts(relPath: string): { cardId: string; file: string } | null {
+  const segments = safeSegments(relPath);
+  const [dir, cardId, file] = segments ?? [];
+  if (segments?.length !== 3 || dir !== CARD_MEDIA_DIR || cardId === undefined || file === undefined) return null;
+  if (!cardIdSchema.safeParse(cardId).success || mediaKindOf(file) !== "image") return null;
+  return { cardId, file };
+}
+
+export async function cardMediaFile(ctx: MediaContext, relPath: string): Promise<CardMediaFile | null> {
+  const parts = cardMediaParts(relPath);
+  const root = parts === null ? null : await realpath(cardMediaDir(ctx)).catch(() => null);
+  if (parts === null || root === null) return null;
+  const expected = path.join(root, parts.cardId, parts.file);
+  if ((await realpath(expected).catch(() => null)) !== expected) return null;
+  const stats = await lstat(expected).catch(() => null);
+  return stats?.isFile() === true ? { file: expected, size: stats.size } : null;
+}
+
+export async function findCardImage(ctx: MediaContext, cardId: string, target: string): Promise<string | null> {
+  if (!isOwnCardMedia(target, cardId)) return null;
+  return (await cardMediaFile(ctx, target))?.file ?? null;
 }
