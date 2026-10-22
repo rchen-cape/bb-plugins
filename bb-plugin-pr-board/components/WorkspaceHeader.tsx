@@ -4,6 +4,7 @@ import type { PullDetail, ReviewState } from "../contract";
 import { BOARD_PANEL } from "../routes";
 import { cn } from "../lib/utils";
 import { Avatar, ToolbarToggle } from "./bits";
+import { explainSource } from "./Explain";
 import { Button } from "./ui/button";
 import { Icon } from "./ui/icon";
 
@@ -14,12 +15,10 @@ export function WorkspaceHeader({
   refreshing,
   running,
   addressing,
-  submittingAddress,
   onShowFindings,
   onRunReview,
   onAddressComments,
   onSubmit,
-  onSubmitAddress,
 }: {
   detail: PullDetail;
   review: ReviewState;
@@ -27,12 +26,10 @@ export function WorkspaceHeader({
   refreshing: boolean;
   running: boolean;
   addressing: boolean;
-  submittingAddress: boolean;
   onShowFindings(): void;
   onRunReview(): void;
   onAddressComments(): void;
   onSubmit(): void;
-  onSubmitAddress(): void;
 }) {
   const navigate = useBbNavigate();
   const [showDescription, setShowDescription] = useState(false);
@@ -147,24 +144,11 @@ export function WorkspaceHeader({
               <Icon name="MessageCirclePlus" className="size-3.5" />
               Address comments
             </Button>
-            <Button
-              size="sm"
-              className="h-7 px-2.5 text-xs"
-              disabled={submittingAddress || review.addressAgent.threadId === null}
-              onClick={onSubmitAddress}
-              title={
-                review.addressAgent.threadId === null
-                  ? "Click Address comments first"
-                  : `Check the accepted changes against the PR's GitHub Actions, then commit and push them to ${detail.headRefName}`
-              }
-            >
-              Submit Address
-            </Button>
           </div>
         </div>
       </header>
       {showDescription ? (
-        <div className="max-h-[40vh] shrink-0 overflow-y-auto border-b border-border px-5 py-3">
+        <div className="max-h-[40vh] shrink-0 overflow-y-auto border-b border-border px-5 py-3" {...explainSource("description", `the description of #${detail.number}`)}>
           <Markdown content={detail.body.trim().length === 0 ? "_No description provided._" : detail.body} className="text-sm" />
         </div>
       ) : null}

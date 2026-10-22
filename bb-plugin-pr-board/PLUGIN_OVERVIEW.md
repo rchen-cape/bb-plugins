@@ -17,6 +17,9 @@ side-by-side diff.
   with their diffs and the comments each one addresses. Each comment shows
   whether its fix is uncommitted, committed, or pushed, and board cards show
   **N uncommitted**, **N to push**, or **Pushed**.
+- An **Explain** thread per PR that starts by itself. Select any code, comment,
+  review comment, finding, or part of the description, and it explains it in
+  plain English with the `/simple-english` skill.
 - ⌘-click go to definition, using gopls for Go and a definition search for
   other languages.
 

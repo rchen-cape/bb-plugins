@@ -34,3 +34,23 @@ export function isCommentable(patch: string | null, side: Side, startLine: numbe
     return lines !== null && startLine >= lines[0] && endLine <= lines[1];
   });
 }
+
+/** The part of startLine–endLine that falls inside one hunk, picking the hunk with the most overlap, or null when none overlaps. */
+export function commentableRange(
+  patch: string | null,
+  side: Side,
+  startLine: number,
+  endLine: number,
+): { startLine: number; endLine: number } | null {
+  if (patch === null) return null;
+  let best: { startLine: number; endLine: number } | null = null;
+  for (const hunk of hunkRanges(patch)) {
+    const lines = hunk[side];
+    if (lines === null) continue;
+    const first = Math.max(startLine, lines[0]);
+    const last = Math.min(endLine, lines[1]);
+    if (first > last) continue;
+    if (best === null || last - first > best.endLine - best.startLine) best = { startLine: first, endLine: last };
+  }
+  return best;
+}

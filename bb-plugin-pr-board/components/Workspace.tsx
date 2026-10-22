@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { experimental_useAppPanel, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import { UPDATES_CHANNEL } from "../channel";
 import type {
@@ -13,8 +13,8 @@ import type {
   rpcContract,
 } from "../contract";
 import type { DiffStyle } from "../highlight";
-import { isCommentable } from "../patch";
-import type { PullRoute } from "../routes";
+import { commentableRange } from "../patch";
+import { EXPLAIN_THREAD_TAB, type PullRoute } from "../routes";
 import { cn } from "../lib/utils";
 import type { Composer, ReviewActions } from "./Annotations";
 import { ChangeDiffPane, type ChangeTarget } from "./Changes";
@@ -22,9 +22,9 @@ import { CommentsView, commentLabels, type CommentActions } from "./Comments";
 import { ToolbarToggle } from "./bits";
 import { errorMessage, useCached } from "./cache";
 import { DiffPane, type DefinitionRequest, type DiffFocus } from "./DiffPane";
+import { ExplainBar, selectedTarget, type ExplainTarget } from "./Explain";
 import { DefinitionPicker, PeekPane, type PeekTarget } from "./PeekPane";
 import { Sidebar, type SidebarTab } from "./Sidebar";
-import { SubmitAddressDialog } from "./SubmitAddress";
 import { SubmitReviewDialog } from "./SubmitReview";
 import { Button } from "./ui/button";
 import { Icon } from "./ui/icon";
@@ -109,6 +109,7 @@ const EMPTY_STATE: ReviewState = {
   drafts: [],
   addressAgent: { threadId: null, running: false },
   suggestions: [],
+  explainAgent: { threadId: null, running: false },
 };
 const ADDRESS_POLL_MS = 10_000;
 
@@ -152,9 +153,11 @@ function Workspace({
   const [picker, setPicker] = useState<{ result: DefinitionResult; sha: string } | null>(null);
   const [viewed, setViewed] = useState<ReadonlyMap<string, boolean>>(new Map());
   const [submitOpen, setSubmitOpen] = useState(false);
-  const [submitAddressOpen, setSubmitAddressOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const [addressing, setAddressing] = useState(false);
+  const [explainTarget, setExplainTarget] = useState<ExplainTarget | null>(null);
+  const [explaining, setExplaining] = useState(false);
+  const appPanel = experimental_useAppPanel();
   const seq = useRef(0);
   const nextSeq = () => ++seq.current;
   const addressThreadId = review.addressAgent.threadId;
@@ -256,7 +259,7 @@ function Workspace({
     const focus =
       finding.startLine === null || finding.endLine === null
         ? null
-        : { side: finding.side, line: finding.startLine, endLine: finding.endLine, seq: nextSeq() };
+        : { side: finding.side, line: finding.startLine, endLine: finding.endLine, anchor: `finding:${finding.id}`, seq: nextSeq() };
     goTo({ kind: "diff", path: file.path, focus }, true);
   };
 
@@ -278,9 +281,12 @@ function Workspace({
   };
 
   const findDefinition = (request: DefinitionRequest) => {
-    const id = toast.loading(`Finding ${request.symbol}…`);
+    // Most lookups answer in a few milliseconds; only say "Finding…" when one takes longer.
+    const id = `definition:${nextSeq()}`;
+    const slow = setTimeout(() => toast.loading(`Finding ${request.symbol}…`, { id }), 300);
     rpc
       .call("definition", { ...pull, ...request })
+      .finally(() => clearTimeout(slow))
       .then((result) => {
         toast.dismiss(id);
         const [only, ...rest] = result.definitions;
@@ -341,18 +347,24 @@ function Workspace({
         toast.error("This finding has no line range in the diff to comment on.");
         return;
       }
-      if (!isCommentable(file.patch, finding.side, finding.startLine, finding.endLine)) {
-        toast.error("GitHub only takes review comments inside the diff's hunks, and this finding is outside them.");
+      // GitHub only takes comments inside a hunk, so a finding that runs past one is trimmed to the lines it shares with it.
+      const range = commentableRange(file.patch, finding.side, finding.startLine, finding.endLine);
+      if (range === null) {
+        toast.error(
+          finding.headSha !== null && finding.headSha !== detail.headSha
+            ? "This finding is outdated: its lines are no longer in the diff. Run the review again to place it on current lines."
+            : "GitHub only takes review comments on changed lines, and none of this finding's lines are in the diff.",
+        );
         return;
       }
       if (currentFile?.path !== file.path) selectFile(file.path);
       setComposer({
         path: file.path,
         side: finding.side,
-        startLine: finding.startLine,
-        endLine: finding.endLine,
+        startLine: range.startLine,
+        endLine: range.endLine,
         draftId: null,
-        initialBody: `**${finding.title}**\n\n${finding.body}`.trim(),
+        initialBody: `${finding.title}\n\n${finding.body}`.trim(),
       });
     },
     editDraft(draft) {
@@ -404,6 +416,40 @@ function Workspace({
       .finally(() => setAddressing(false));
   };
 
+  useEffect(() => {
+    rpc
+      .call("openExplain", pull)
+      .then(({ created }) => {
+        if (created) reloadState();
+      })
+      .catch((error: unknown) => toast.error(`Could not start the explain thread: ${errorMessage(error)}`));
+  }, [pullKey]);
+
+  useEffect(() => setExplainTarget(null), [current?.kind, currentFile?.path]);
+
+  const captureSelection = (event: MouseEvent) => {
+    const origin = event.nativeEvent.composedPath()[0];
+    if (!(origin instanceof Node) || isTyping(origin) || (origin instanceof Element && origin.closest("[data-explain-bar]") !== null)) return;
+    setExplainTarget(selectedTarget(origin));
+  };
+
+  const explain = (question: string) => {
+    if (explainTarget === null) return;
+    setExplaining(true);
+    rpc
+      .call("explain", { ...pull, ...explainTarget, question })
+      .then(() => {
+        setExplainTarget(null);
+        document.getSelection()?.removeAllRanges();
+        if (!appPanel.openFixedTab({ surface: { kind: "current" }, tab: EXPLAIN_THREAD_TAB })) {
+          toast.success("Sent to the explain thread. Open the Explain thread tab to read the answer.");
+        }
+        reloadState();
+      })
+      .catch((error: unknown) => toast.error(errorMessage(error)))
+      .finally(() => setExplaining(false));
+  };
+
   const commentActions: CommentActions = {
     reply: actions.reply,
     resolveThread: actions.resolveThread,
@@ -432,19 +478,15 @@ function Workspace({
         return;
       }
       const focus =
-        thread.line === null ? null : { side: thread.side, line: thread.startLine ?? thread.line, endLine: thread.line, seq: nextSeq() };
+        thread.line === null
+          ? null
+          : { side: thread.side, line: thread.startLine ?? thread.line, endLine: thread.line, anchor: `thread:${thread.id}`, seq: nextSeq() };
       setTab("files");
       goTo({ kind: "diff", path: file.path, focus }, true);
     },
     openThread(threadId) {
       navigate.toThread(threadId);
     },
-  };
-
-  const submitAddress = async () => {
-    await rpc.call("submitAddress", pull);
-    toast.success(`Sent to the address thread: it runs the checks, then commits and pushes to ${detail.headRefName} if they pass.`);
-    reloadState();
   };
 
   const submitReview = async (event: ReviewEvent, body: string) => {
@@ -532,7 +574,7 @@ function Workspace({
   );
 
   return (
-    <div ref={rootRef} className="flex h-full min-h-0 flex-col">
+    <div ref={rootRef} className="flex h-full min-h-0 flex-col" onMouseUp={captureSelection}>
       <WorkspaceHeader
         detail={detail}
         review={review}
@@ -546,8 +588,6 @@ function Workspace({
         }}
         onRunReview={runReview}
         onAddressComments={addressComments}
-        submittingAddress={submitAddressOpen}
-        onSubmitAddress={() => setSubmitAddressOpen(true)}
         onSubmit={() => setSubmitOpen(true)}
       />
       <div className={cn("flex min-h-0 flex-1", narrow && "flex-col")}>
@@ -713,6 +753,15 @@ function Workspace({
               />
             ) : null}
           </div>
+          {explainTarget === null ? null : (
+            <ExplainBar
+              key={`${explainTarget.label}\n${explainTarget.quote}`}
+              target={explainTarget}
+              sending={explaining}
+              onSend={explain}
+              onClose={() => setExplainTarget(null)}
+            />
+          )}
         </main>
       </div>
       <SubmitReviewDialog
@@ -721,13 +770,6 @@ function Workspace({
         pendingComments={review.drafts.length}
         isAuthor={detail.author.login === detail.viewer}
         onSubmit={submitReview}
-      />
-      <SubmitAddressDialog
-        open={submitAddressOpen}
-        onOpenChange={setSubmitAddressOpen}
-        branch={detail.headRefName}
-        acceptedChanges={review.suggestions.filter((suggestion) => suggestion.changeState === "applied").length}
-        onSubmit={submitAddress}
       />
     </div>
   );

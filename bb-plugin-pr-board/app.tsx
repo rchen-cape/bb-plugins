@@ -1,8 +1,8 @@
 import { definePluginApp, type PluginNavPanelProps } from "@get-bb/plugin-sdk/app";
 import { BoardView } from "./components/Board";
-import { AddressThreadTab, ReviewThreadTab, ThreadDiffButton } from "./components/ThreadPanels";
+import { AddressThreadTab, ExplainThreadTab, ReviewThreadTab, ThreadDiffButton } from "./components/ThreadPanels";
 import { ReviewWorkspace } from "./components/Workspace";
-import { ADDRESS_THREAD_TAB, BOARD_PANEL, REVIEW_THREAD_TAB, parseWorkspacePath } from "./routes";
+import { ADDRESS_THREAD_TAB, BOARD_PANEL, EXPLAIN_THREAD_TAB, REVIEW_THREAD_TAB, parseWorkspacePath } from "./routes";
 
 function BoardPanel({ subPath }: PluginNavPanelProps) {
   const pull = parseWorkspacePath(subPath);
@@ -19,6 +19,7 @@ export default definePluginApp((app) => {
     fixedTabs: [
       { ...REVIEW_THREAD_TAB, title: "Review thread", icon: "MessageSquare", component: ReviewThreadTab, layout: "flush" },
       { ...ADDRESS_THREAD_TAB, title: "Address thread", icon: "MessageCirclePlus", component: AddressThreadTab, layout: "flush" },
+      { ...EXPLAIN_THREAD_TAB, title: "Explain thread", icon: "Lightbulb", component: ExplainThreadTab, layout: "flush" },
     ],
   });
   app.slots.experimental_threadHeaderAction({

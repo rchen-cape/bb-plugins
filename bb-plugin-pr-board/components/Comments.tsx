@@ -7,6 +7,8 @@ import type { CommentFixStatus, ConversationComment, FixSource, FixState, PullDe
 import { cn } from "../lib/utils";
 import { Avatar, relativeTime } from "./bits";
 import { errorMessage } from "./cache";
+import { pinIntoView } from "./code";
+import { explainSource } from "./Explain";
 import { Button } from "./ui/button";
 import { Icon } from "./ui/icon";
 
@@ -254,7 +256,7 @@ function SuggestionBlock({
           {suggestion.changeState === "applied" ? (
             <p className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
               <Icon name="CircleCheck" className="size-3.5" aria-hidden />
-              Applied to the address thread's worktree. Submit Address commits and pushes it.
+              Applied to the address thread's worktree.
             </p>
           ) : (
             <ChangeFiles suggestion={suggestion} version={version} />
@@ -401,14 +403,27 @@ function useReplyDraft(actions: CommentActions) {
 function useFocusScroll(focused: CommentFocus | null) {
   const ref = useRef<HTMLElement>(null);
   useEffect(() => {
-    if (focused !== null) ref.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+    if (focused === null || ref.current === null) return;
+    return pinIntoView(ref.current, "start");
   }, [focused?.seq]);
   return ref;
 }
 
-function CommentBody({ author, createdAt, body, note }: { author: ConversationComment["author"]; createdAt: string; body: string; note?: string }) {
+function CommentBody({
+  author,
+  createdAt,
+  body,
+  note,
+  explain,
+}: {
+  author: ConversationComment["author"];
+  createdAt: string;
+  body: string;
+  note?: string;
+  explain: ReturnType<typeof explainSource>;
+}) {
   return (
-    <div className="space-y-1">
+    <div className="space-y-1" {...explain}>
       <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <Avatar person={author} />
         <span className="font-medium text-foreground">{author.login}</span>
@@ -502,7 +517,13 @@ function CodeCommentCard({
       {open ? (
         <>
           {thread.comments.map((comment) => (
-            <CommentBody key={comment.id} author={comment.author} createdAt={comment.createdAt} body={comment.body} />
+            <CommentBody
+              key={comment.id}
+              author={comment.author}
+              createdAt={comment.createdAt}
+              body={comment.body}
+              explain={explainSource("review-comment", `review comment by @${comment.author.login} on ${thread.path}${range}`)}
+            />
           ))}
           {suggestions.map((suggestion) => (
             <SuggestionBlock
@@ -554,7 +575,13 @@ function ConversationCard({
     <CardShell focused={focused}>
       <div className="flex items-start gap-1.5">
         <div className="min-w-0 flex-1">
-          <CommentBody author={comment.author} createdAt={comment.createdAt} body={comment.body} note={comment.kind === "review" ? "reviewed" : undefined} />
+          <CommentBody
+            author={comment.author}
+            createdAt={comment.createdAt}
+            body={comment.body}
+            note={comment.kind === "review" ? "reviewed" : undefined}
+            explain={explainSource("comment", `${comment.kind === "review" ? "review summary" : "comment"} by @${comment.author.login}`)}
+          />
         </div>
         <FixStatusChip fix={fix} />
         <button
@@ -608,7 +635,7 @@ function AddressStatus({ review, actions }: { review: ReviewState; actions: Comm
         ? "The address thread is working. Its suggestions appear under each comment when it records them."
         : review.suggestions.length === 0
           ? "The address thread has not recorded any suggestions yet."
-          : `${open} open suggestion${open === 1 ? "" : "s"}. Accepted changes go to the address thread's worktree until you click Submit Address.`;
+          : `${open} open suggestion${open === 1 ? "" : "s"}. Accepted changes go to the address thread's worktree.`;
   return (
     <div className="flex items-center gap-2 rounded-lg border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
       {running ? <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-sky-500" aria-hidden /> : null}

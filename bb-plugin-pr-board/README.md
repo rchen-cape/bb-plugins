@@ -87,8 +87,8 @@ everything else that uses your `gh` login), the board refreshes cheaply:
 ## Review page
 
 Click a card to open `/plugins/pr-board/board/pr/<owner>/<repo>/<n>`. Opening
-a PR starts no agent. **Run review** starts a review thread when the PR has no
-live one:
+a PR starts only its explain thread (see [Explaining](#explaining)), not a
+review. **Run review** starts a review thread when the PR has no live one:
 
 - in the project whose git remote matches the repository, or the **Review
   project** setting;
@@ -98,10 +98,15 @@ live one:
 - with a first message that asks for a short, plain summary of the PR;
 - followed by `/thermo-nuclear-code-quality-review review pr <n>`, sent after
   the checkout and queued behind the summary. The message asks the agent to
-  record its findings with the `pr_board_record_findings` tool.
+  record its findings with the `pr_board_record_findings` tool. Each finding
+  becomes a PR comment when you click **Comment**, so the message also asks
+  the agent to write titles and explanations by the Document rules of the
+  `simple-english` skill, and to lint them with its `ste_lint.py --type
+  descriptive --gate` before it records them.
 
-The review thread's chat is the page's **Review thread** panel tab, and the
-address thread's chat is the **Address thread** tab beside it. The
+The review thread's chat is the page's **Review thread** panel tab, the
+address thread's chat is the **Address thread** tab beside it, and the explain
+thread's chat is the **Explain thread** tab. The
 **Review diff** button in a review thread's header opens the page from the
 thread.
 
@@ -144,8 +149,39 @@ The page has:
   [Tracking fixes](#tracking-fixes).
 - **Description**: the PR body.
 - **Run review**: starts the review thread, or sends the review command to it again.
-- **Address comments** (under Run review) and **Submit Address** (under Submit
-  review): see below.
+- **Address comments** (under Run review): see below.
+
+### Explaining
+
+Each PR has an explain thread. It starts by itself the first time you open the
+PR's page or its **Explain thread** tab, so there is no button. It runs on
+Claude Code in the project's default environment (it reads the PR with `gh`,
+not from a checkout of the PR head), with no PR Board tools, and its first
+message loads the `/simple-english` skill. Every answer follows that skill's
+Reply rules: plain prose with the answer first, terms defined at first use, and
+no headers, bullets, bold, or em-dashes. Before each answer, the thread runs
+the skill's linter (`ste_lint.py --type reply --gate`) on its draft and fixes
+what it finds. The thread only reads. It does not edit files, check out
+branches, or post to GitHub.
+
+To ask about part of the PR:
+
+1. Select text anywhere on the page: code in the diff, the description, a
+   comment, a review comment, or a finding.
+2. A bar at the bottom of the diff shows where the selection came from and a
+   preview of it. Type a question, or leave it empty to ask what it means.
+3. Press **Explain**. The selection, its source, and your question go to the
+   explain thread, and the **Explain thread** tab opens.
+
+`Esc`, the close button, or a click elsewhere closes the bar.
+
+The skill must be installed in Claude Code at `~/.claude/skills/simple-english`,
+with the linter beside it in `scripts/`. From a copy of
+<https://github.com/AminBlg/SimpleEnglish>, copy `skills/simple-english/` to
+that folder, then copy `evals/ste_lint.py` and `evals/slop.tsv` to its
+`scripts/` folder. The repository's Claude Code plugin also works, but its
+session hook loads the rules into every Claude Code session, not only the
+explain thread.
 
 ### Addressing comments
 
@@ -227,7 +263,7 @@ counts as committed in the first commit after it that touches its files, and
 shows nothing once its files have neither a change nor such a commit (for
 example after you discard it).
 
-**Submit Address** asks you to confirm, then sends the address thread one
+`bb pr-board submit-address` sends the address thread one
 message. It runs the check, lint, typecheck, build, and test steps of the
 repository's pull-request GitHub Actions workflows on its worktree and lists
 what it had to skip. When a check fails, it may fix it only with edits that do
@@ -243,7 +279,7 @@ commit it made is signed with your git signing key (`git commit -S`, never
 alone, with no `Co-Authored-By: Claude` trailer or other AI attribution in the
 message (it rewords any unpushed commit that has one). Then it pushes to the
 PR's head branch without force, and watches `gh pr checks`. It never merges the
-pull request. The button needs an address thread, and the server refuses when
+pull request. It needs an address thread, and the server refuses when
 that thread's worktree has no changes.
 
 The diff layout is **Auto** by default: split when the diff area is at least
@@ -257,7 +293,7 @@ and toolbar buttons show icons only.
 
 ### Commenting
 
-Hover a line number and click **+**, or drag across line numbers first for a
+Click a line number (or hover it and click **+**), or drag across line numbers for a
 range. The editor offers:
 
 - **Add to review**: saves a pending comment in the plugin's database (⌘↵).
@@ -277,10 +313,13 @@ refuses ranges outside one, and a range must stay inside one hunk.
 ### Go to definition
 
 ⌘-click (Ctrl-click off macOS) an identifier in the diff. The lookup runs in the
-review thread's worktree:
+review thread's worktree, or, when the PR has none, in the checkout of the bb
+project whose git remote is the PR's repository, so no agent is needed:
 
-- Go code on the PR's head uses `gopls definition`, including definitions in
-  the standard library and module cache, which open read-only.
+- Go code on the PR's head uses gopls, kept running per worktree like an
+  editor's language server, so lookups after the first answer at once. It stops
+  after ten idle minutes. Definitions in the standard library and module cache
+  open read-only.
 - Everything else, and the old side of the diff, searches the commit with
   `git grep` for definition patterns in Go, TypeScript/JavaScript, Python,
   Rust, C/C++, JVM languages, Swift, C#, and protobuf, ranked same file, then
@@ -323,7 +362,7 @@ See `skills/pr-board/SKILL.md` for the output formats.
 
 ## Storage
 
-The plugin database keeps the PR of each review and address thread (with the
+The plugin database keeps the PR of each review, address, and explain thread (with the
 commit the address thread started from), the findings, the comment
 suggestions, the fixes linked to comments, and pending comments. Commit and
 push state is read from the worktree with `git`, not stored. Accepted changes go
@@ -338,8 +377,9 @@ resolve a thread, mark a file viewed, or submit a review.
   files over 2 MB show the patch only.
 - Findings keep the head commit they were recorded on. After new commits they
   show **outdated**, and their lines may have moved.
-- Go to definition needs the review worktree. On the head side it uses the
-  checked-out files, so local edits in the worktree can shift gopls results.
+- Go to definition needs the review worktree or a local checkout. On the head
+  side it uses the checked-out files, so local edits in the worktree can shift gopls
+  results.
 - The board reads the 30 most recently updated open PRs from each of its two
   searches and the newest 30 review threads per PR, so counts on PRs with more
   threads leave out the oldest ones. The review page still reads up to 100

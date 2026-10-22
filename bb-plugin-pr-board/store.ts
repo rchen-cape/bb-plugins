@@ -214,6 +214,13 @@ export function createStore(storage: BbPluginApi["storage"]) {
     )`,
     `CREATE INDEX comment_fixes_pull ON comment_fixes (repo, number, created_at)`,
     `ALTER TABLE address_threads ADD COLUMN address_start_head TEXT`,
+    `CREATE TABLE explain_threads (
+      thread_id TEXT PRIMARY KEY,
+      repo TEXT NOT NULL,
+      number INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    )`,
+    `CREATE INDEX explain_threads_pull ON explain_threads (repo, number, created_at)`,
   ]);
 
   const statements = {
@@ -291,6 +298,13 @@ export function createStore(storage: BbPluginApi["storage"]) {
     ),
     setStartHead: db.prepare("UPDATE address_threads SET address_start_head = ? WHERE thread_id = ? AND address_start_head IS NULL"),
     startHead: db.prepare("SELECT address_start_head FROM address_threads WHERE thread_id = ?"),
+    recordExplainThread: db.prepare(
+      "INSERT OR REPLACE INTO explain_threads (thread_id, repo, number, created_at) VALUES (?, ?, ?, ?)",
+    ),
+    explainThreadsForPull: db.prepare(
+      "SELECT thread_id FROM explain_threads WHERE repo = ? AND number = ? ORDER BY created_at DESC",
+    ),
+    pullForExplainThread: db.prepare("SELECT repo, number FROM explain_threads WHERE thread_id = ?"),
   };
 
   return {
@@ -367,6 +381,15 @@ export function createStore(storage: BbPluginApi["storage"]) {
     },
     pullForAddressThread(threadId: string): PullKey | null {
       return (statements.pullForAddressThread.get(threadId) as PullKey | undefined) ?? null;
+    },
+    recordExplainThread(threadId: string, pull: PullKey, now: number): void {
+      statements.recordExplainThread.run(threadId, pull.repo, pull.number, now);
+    },
+    explainThreadsForPull(pull: PullKey): string[] {
+      return (statements.explainThreadsForPull.all(pull.repo, pull.number) as Array<{ thread_id: string }>).map((row) => row.thread_id);
+    },
+    pullForExplainThread(threadId: string): PullKey | null {
+      return (statements.pullForExplainThread.get(threadId) as PullKey | undefined) ?? null;
     },
     suggestions(pull: PullKey, threadId: string): Suggestion[] {
       return (statements.suggestions.all(pull.repo, pull.number, threadId) as SuggestionRow[]).map(toSuggestion);

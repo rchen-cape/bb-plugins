@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Markdown, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import type { Draft, Finding, ReviewThread, Side } from "../contract";
@@ -7,6 +7,7 @@ import { Avatar, SeverityBadge, lineLabel, relativeTime } from "./bits";
 import { Button } from "./ui/button";
 import { Icon } from "./ui/icon";
 import { errorMessage } from "./cache";
+import { explainSource } from "./Explain";
 
 export interface CommentTarget {
   path: string;
@@ -51,9 +52,9 @@ export function annotationKey(data: AnnotationData): string {
   }
 }
 
-function Card({ className, children }: { className?: string; children: ReactNode }) {
+function Card({ className, explain, children }: { className?: string; explain?: ReturnType<typeof explainSource>; children: ReactNode }) {
   return (
-    <div className={cn("mx-2 my-1.5 whitespace-normal rounded-lg border bg-background p-3 font-sans text-sm text-foreground shadow-xs", className)}>
+    <div className={cn("mx-2 my-1.5 whitespace-normal rounded-lg border bg-background p-3 font-sans text-sm text-foreground shadow-xs", className)} {...explain}>
       {children}
     </div>
   );
@@ -72,11 +73,15 @@ function useBusy() {
 }
 
 const SIDE_LABEL: Record<Side, string> = { additions: "new", deletions: "old" };
+const FOCUSED = "ring-2 ring-sky-500/60";
 
-export function FindingCard({ finding, outdated, actions }: { finding: Finding; outdated: boolean; actions: ReviewActions }) {
+export function FindingCard({ finding, outdated, focused = false, actions }: { finding: Finding; outdated: boolean; focused?: boolean; actions: ReviewActions }) {
   const { busy, run } = useBusy();
   return (
-    <Card className="border-amber-500/50 bg-amber-500/5">
+    <Card
+      className={cn("border-amber-500/50 bg-amber-500/5", focused && FOCUSED)}
+      explain={explainSource("finding", `review finding "${finding.title}" on ${finding.path} ${lineLabel(finding.startLine, finding.endLine)}`.trim())}
+    >
       <div className="flex flex-wrap items-center gap-1.5">
         <Icon name="Bot" className="size-3.5 text-amber-600 dark:text-amber-400" aria-hidden />
         <SeverityBadge severity={finding.severity} />
@@ -108,9 +113,12 @@ export function FindingCard({ finding, outdated, actions }: { finding: Finding; 
   );
 }
 
-export function ThreadCard({ thread, actions }: { thread: ReviewThread; actions: ReviewActions }) {
+export function ThreadCard({ thread, focused = false, actions }: { thread: ReviewThread; focused?: boolean; actions: ReviewActions }) {
   const navigate = useBbNavigate();
-  const [open, setOpen] = useState(!thread.isResolved);
+  const [open, setOpen] = useState(!thread.isResolved || focused);
+  useEffect(() => {
+    if (focused) setOpen(true);
+  }, [focused]);
   const [reply, setReply] = useState("");
   const { busy, run } = useBusy();
   const first = thread.comments[0];
@@ -121,7 +129,7 @@ export function ThreadCard({ thread, actions }: { thread: ReviewThread; actions:
       setReply("");
     });
   return (
-    <Card className={cn(thread.isResolved && "opacity-80")}>
+    <Card className={cn(thread.isResolved && !focused && "opacity-80", focused && FOCUSED)}>
       <div className="flex items-center gap-1.5">
         <button
           type="button"
@@ -161,7 +169,11 @@ export function ThreadCard({ thread, actions }: { thread: ReviewThread; actions:
       {open ? (
         <div className="mt-2 space-y-3">
           {thread.comments.map((comment) => (
-            <div key={comment.id} className="space-y-1">
+            <div
+              key={comment.id}
+              className="space-y-1"
+              {...explainSource("review-comment", `review comment by @${comment.author.login} on ${thread.path}${thread.line === null ? "" : ` line ${thread.line}`}`)}
+            >
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <Avatar person={comment.author} />
                 <span className="font-medium text-foreground">{comment.author.login}</span>
@@ -276,12 +288,12 @@ export function CommentEditor({ composer, suggestion, actions }: { composer: Com
   );
 }
 
-export function AnnotationView({ data, actions }: { data: AnnotationData; actions: ReviewActions }) {
+export function AnnotationView({ data, focused = false, actions }: { data: AnnotationData; focused?: boolean; actions: ReviewActions }) {
   switch (data.kind) {
     case "finding":
-      return <FindingCard finding={data.finding} outdated={data.outdated} actions={actions} />;
+      return <FindingCard finding={data.finding} outdated={data.outdated} focused={focused} actions={actions} />;
     case "thread":
-      return <ThreadCard thread={data.thread} actions={actions} />;
+      return <ThreadCard thread={data.thread} focused={focused} actions={actions} />;
     case "draft":
       return <DraftCard draft={data.draft} actions={actions} />;
     case "composer":

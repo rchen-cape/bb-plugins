@@ -126,6 +126,7 @@ const STATE: ReviewState = {
   drafts: [{ id: "d1", path: "cmd/main.go", side: "additions", startLine: 4, endLine: 4, body: "Pending note" }],
   addressAgent: { threadId: null, running: false },
   suggestions: [],
+  explainAgent: { threadId: "thr_explain", running: false },
 };
 
 const NEW_FILE = "package main\n\nfunc a() int { return b() }\nfunc b() int { return 1 }\n";
@@ -135,6 +136,7 @@ function workspaceRpc(state: ReviewState, extra: Record<string, (input: unknown)
   return {
     pull: () => DETAIL,
     reviewState: () => state,
+    openExplain: () => ({ threadId: "thr_explain", created: false }),
     fileAt: (input: unknown) => ({ content: (input as { sha: string }).sha === HEAD ? NEW_FILE : OLD_FILE, unavailable: null }),
     ...extra,
   };
@@ -270,6 +272,41 @@ describe("review workspace", () => {
     expect(await slot.findByText("1 pending comment will be posted with this review.")).toBeTruthy();
   });
 
+  it("starts the explain thread on open and sends selected text with where it came from", async () => {
+    const slot = renderSlot(
+      boardPanel(),
+      { subPath: "pr/acme/app/7" },
+      { rpc: workspaceRpc(STATE, { explain: () => ({ threadId: "thr_explain", delivery: "sent" }) }) },
+    );
+    await slot.findByText("Add thing");
+    await waitFor(() => expect(slot.inspection.rpcCalls.some((call) => call.method === "openExplain")).toBe(true));
+
+    const body = (await slot.findByText("b is a pass-through.")).firstChild as Text;
+    const range = document.createRange();
+    range.setStart(body, 0);
+    range.setEnd(body, "b is a pass-through".length);
+    document.getSelection()?.removeAllRanges();
+    document.getSelection()?.addRange(range);
+    fireEvent.mouseUp(body.parentElement!);
+
+    const bar = await slot.findByRole("dialog", { name: "Explain the selection" });
+    expect(within(bar).getByText('review finding "Inline b into a" on cmd/main.go L3–4')).toBeTruthy();
+    fireEvent.change(within(bar).getByLabelText("Question about the selection"), { target: { value: "Why inline it?" } });
+    fireEvent.click(within(bar).getByRole("button", { name: "Explain" }));
+
+    await waitFor(() => expect(slot.inspection.rpcCalls.some((call) => call.method === "explain")).toBe(true));
+    expect(slot.inspection.rpcCalls.find((call) => call.method === "explain")?.input).toEqual({
+      repo: "acme/app",
+      number: 7,
+      source: "finding",
+      label: 'review finding "Inline b into a" on cmd/main.go L3–4',
+      quote: "b is a pass-through",
+      question: "Why inline it?",
+    });
+    await waitFor(() => expect(slot.inspection.experimental_fixedTabOpenCalls).toHaveLength(1));
+    expect(slot.queryByRole("dialog", { name: "Explain the selection" })).toBeNull();
+  });
+
   it("looks up the definition of a ⌘-clicked symbol at its position in the new file", async () => {
     const slot = renderSlot(
       boardPanel(),
@@ -323,7 +360,7 @@ describe("review workspace", () => {
     );
     fireEvent.click(await slot.findByRole("button", { name: "Comment" }));
     const editor = (await slot.findByRole("textbox", { name: "Comment" })) as HTMLTextAreaElement;
-    expect(editor.value).toBe("**Inline b into a**\n\nb is a pass-through.");
+    expect(editor.value).toBe("Inline b into a\n\nb is a pass-through.");
     fireEvent.click(slot.getByRole("button", { name: "Suggest change" }));
     expect(editor.value).toContain("```suggestion\nfunc a() int { return b() }\nfunc b() int { return 1 }\n```");
     fireEvent.click(slot.getByRole("button", { name: "Add to review" }));
@@ -436,7 +473,7 @@ describe("comments", () => {
     expect(listed(/carol\s*Rename b/)?.style.color).toBe("var(--attention)");
     expect(listed(/dave\s*Please add docs/)?.getAttribute("title")).toBeNull();
     expect(await slot.findByText("Rename b to c")).toBeTruthy();
-    expect(slot.getByText("3 open suggestions. Accepted changes go to the address thread's worktree until you click Submit Address.")).toBeTruthy();
+    expect(slot.getByText("3 open suggestions. Accepted changes go to the address thread's worktree.")).toBeTruthy();
 
     const calls = (method: string) => slot.inspection.rpcCalls.filter((call) => call.method === method).map((call) => call.input);
     const single = slot.getByRole("button", { name: /^cmd\/main\.go\s*\+/ });
@@ -470,27 +507,13 @@ describe("comments", () => {
     await waitFor(() => expect(calls("addressComments")).toEqual([{ repo: "acme/app", number: 9 }]));
   });
 
-  it("stacks the review and address buttons and confirms Submit Address before sending it", async () => {
-    const slot = renderSlot(
-      boardPanel(),
-      { subPath: "pr/acme/app/10" },
-      { rpc: workspaceRpc(SUGGESTED, { pull: () => ({ ...COMMENTED, number: 10 }), submitAddress: () => ({ threadId: "thr_address", delivery: "queued" }) }) },
-    );
+  it("stacks the review and address buttons, with no Submit Address button", async () => {
+    const slot = renderSlot(boardPanel(), { subPath: "pr/acme/app/10" }, { rpc: workspaceRpc(SUGGESTED, { pull: () => ({ ...COMMENTED, number: 10 }) }) });
     expect(await slot.findByText("Add thing")).toBeTruthy();
-    const buttons = ["Run review", "Submit review", "Address comments", "Submit Address"].map((name) => slot.getByRole("button", { name: new RegExp(`^${name}`) }));
+    const buttons = ["Run review", "Submit review", "Address comments"].map((name) => slot.getByRole("button", { name: new RegExp(`^${name}`) }));
     expect([...(buttons[0]?.parentElement?.children ?? [])]).toEqual(buttons);
     expect(buttons[0]?.parentElement?.className).toContain("grid-cols-2");
-    await waitFor(() => expect(buttons[3]?.hasAttribute("disabled")).toBe(false));
-    fireEvent.click(buttons[3]!);
-    const dialog = await slot.findByRole("dialog");
-    expect(dialog.textContent).toContain("it may fix it with edits that don't change behavior");
-    expect(dialog.textContent).toContain("If a check still fails or needs a logic change, it stops without committing or pushing.");
-    expect(dialog.textContent).toContain("Every commit is signed with your git signing key");
-    expect(slot.inspection.rpcCalls.some((call) => call.method === "submitAddress")).toBe(false);
-    fireEvent.click(within(dialog).getByRole("button", { name: "Submit Address" }));
-    await waitFor(() =>
-      expect(slot.inspection.rpcCalls.filter((call) => call.method === "submitAddress").map((call) => call.input)).toEqual([{ repo: "acme/app", number: 10 }]),
-    );
+    expect(slot.queryByRole("button", { name: /^Submit Address/ })).toBeNull();
   });
 
   const COMMIT = "c".repeat(40);
@@ -623,7 +646,7 @@ describe("thread tabs", () => {
   }
 
   it("adds an Address thread tab beside the Review thread tab that shows the PR's address thread", async () => {
-    expect(boardPanel().fixedTabs?.map((tab) => tab.title)).toEqual(["Review thread", "Address thread"]);
+    expect(boardPanel().fixedTabs?.map((tab) => tab.title)).toEqual(["Review thread", "Address thread", "Explain thread"]);
     const empty = renderSlot(fixedTab("address-thread"), { subPath: "pr/acme/app/11" }, { rpc: { reviewState: () => STATE } });
     expect(await empty.findByText("No address thread yet. Click Address comments on the PR page to start one.")).toBeTruthy();
     cleanup();
@@ -635,6 +658,23 @@ describe("thread tabs", () => {
     );
     await waitFor(() => expect(started.inspection.rpcCalls.some((call) => call.method === "reviewState")).toBe(true));
     await waitFor(() => expect(started.queryByText(/Loading the address thread|No address thread yet/)).toBeNull());
+  });
+
+  it("starts the PR's explain thread by itself when the Explain thread tab has none", async () => {
+    const slot = renderSlot(
+      fixedTab("explain-thread"),
+      { subPath: "pr/acme/app/13" },
+      {
+        rpc: {
+          reviewState: () => ({ ...STATE, explainAgent: { threadId: null, running: false } }),
+          openExplain: () => ({ threadId: "thr_explain", created: true }),
+        },
+      },
+    );
+    expect(await slot.findByText("Starting the explain thread…")).toBeTruthy();
+    await waitFor(() =>
+      expect(slot.inspection.rpcCalls).toContainEqual(expect.objectContaining({ method: "openExplain", input: { repo: "acme/app", number: 13 } })),
+    );
   });
 });
 

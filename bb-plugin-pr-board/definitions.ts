@@ -1,9 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, posix, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { z } from "zod";
 import type { Definition, DefinitionResult } from "./contract.js";
 import { CommandError, type Runner } from "./github.js";
+import type { GoplsSessions } from "./gopls.js";
 
 const MAX_DEFINITIONS = 20;
 const PREVIEW_LIMIT = 200;
@@ -147,13 +147,6 @@ export function rankDefinitions(matches: readonly GrepMatch[], fromPath: string,
     .map(({ match }) => ({ path: match.path, line: match.line, preview: preview(match.text), external: false }));
 }
 
-const goplsSchema = z.object({
-  span: z.object({
-    uri: z.string(),
-    start: z.object({ line: z.number().int().positive() }),
-  }),
-});
-
 export interface DefinitionQuery {
   worktree: string;
   sha: string;
@@ -172,23 +165,20 @@ async function lineOf(file: string, line: number): Promise<string | null> {
   }
 }
 
-async function goplsDefinition(run: Runner, gopls: string, query: DefinitionQuery): Promise<Definition | null> {
+async function goplsDefinition(sessions: GoplsSessions, gopls: string, query: DefinitionQuery): Promise<Definition | null> {
   const source = join(query.worktree, query.path);
   const text = await lineOf(source, query.line);
   if (text === null || text.slice(query.character, query.character + query.symbol.length) !== query.symbol) return null;
-  const column = Buffer.byteLength(text.slice(0, query.character), "utf8") + 1;
-  const raw = await run(gopls, ["-remote=auto", "definition", "-json", `${source}:${query.line}:${column}`], {
-    cwd: query.worktree,
-    timeoutMs: 60_000,
-  });
-  const { span } = goplsSchema.parse(JSON.parse(raw));
-  const file = fileURLToPath(span.uri);
+  const found = await sessions.definition(gopls, query.worktree, query.sha, source, query.line, query.character);
+  if (found === null) return null;
+  const file = fileURLToPath(found.uri);
+  const line = found.line + 1;
   const inWorktree = relative(query.worktree, file);
   const external = inWorktree.startsWith("..") || isAbsolute(inWorktree);
   return {
     path: external ? file : inWorktree.split(sep).join("/"),
-    line: span.start.line,
-    preview: preview((await lineOf(file, span.start.line)) ?? ""),
+    line,
+    preview: preview((await lineOf(file, line)) ?? ""),
     external,
   };
 }
@@ -217,9 +207,13 @@ async function searchDefinitions(run: Runner, query: DefinitionQuery): Promise<D
   return rankDefinitions(parseGitGrep(raw, query.sha), query.path, query.symbol);
 }
 
-export async function findDefinitions(run: Runner, gopls: string | null, query: DefinitionQuery): Promise<DefinitionResult> {
+export async function findDefinitions(
+  run: Runner,
+  gopls: { path: string; sessions: GoplsSessions } | null,
+  query: DefinitionQuery,
+): Promise<DefinitionResult> {
   if (gopls !== null && query.atHead && languageOf(query.path) === "go") {
-    const found = await goplsDefinition(run, gopls, query).catch(() => null);
+    const found = await goplsDefinition(gopls.sessions, gopls.path, query).catch(() => null);
     if (found !== null) return { symbol: query.symbol, source: "gopls", definitions: [found], message: null };
   }
   const definitions = await searchDefinitions(run, query);

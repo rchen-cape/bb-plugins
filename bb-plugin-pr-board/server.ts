@@ -15,11 +15,13 @@ import {
   type AgentState,
   type Board,
   type BoardCard,
+  type ExplainRequest,
   type FileContent,
   type PullDetail,
 } from "./contract.js";
 import { findDefinitions } from "./definitions.js";
 import { createGitHub, detailVersion, runCommand, type Gh, type ListedPull, type Runner } from "./github.js";
+import { createGoplsSessions } from "./gopls.js";
 import { createStore, type NewFix, type PullKey } from "./store.js";
 import {
   FIX_INSTRUCTION,
@@ -45,10 +47,16 @@ const REASONING_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 const PERMISSION_MODES = ["accept-edits", "auto", "full"] as const;
 export const REVIEW_SKILL = "/thermo-nuclear-code-quality-review";
 export const FINDINGS_TOOL = "pr_board_record_findings";
+export const EXPLAIN_SKILL = "/simple-english";
+const SIMPLE_ENGLISH_DIR = "~/.claude/skills/simple-english";
+const SIMPLE_ENGLISH_LINT = `python3 ${SIMPLE_ENGLISH_DIR}/scripts/ste_lint.py`;
+export const EXPLAIN_LINT = `${SIMPLE_ENGLISH_LINT} --type reply --gate`;
+export const FINDINGS_LINT = `${SIMPLE_ENGLISH_LINT} --type descriptive --gate`;
 const SKILL_NAME = "pr-board";
 const LIST_TTL_MS = 50_000;
 const DETAIL_REFRESH_MS = 15 * 60_000;
 const PULL_TTL_MS = 50_000;
+const WARM_DELAY_MS = 1_000;
 const VIEWER_TTL_MS = 60 * 60_000;
 const FILE_CACHE_BYTES = 64 * 1024 * 1024;
 const ENVIRONMENT_TIMEOUT_MS = 5 * 60_000;
@@ -137,7 +145,70 @@ export function reviewMessage(pull: Pick<PullDetail, "repo" | "number" | "baseRe
     `The PR head is checked out in this worktree; review its changes against the merge base with ${pull.baseRefName}.`,
     `When the review is done, call the ${FINDINGS_TOOL} tool once with every finding: the repository-relative file path,`,
     `the line range on the PR's new code (side "additions") or on removed code (side "deletions"), a severity, a one-line title, and the explanation.`,
+    `Each title and explanation becomes a review comment on the PR, so write them in Simple English:`,
+    `read ${SIMPLE_ENGLISH_DIR}/SKILL.md and follow its Document rules (plain words, short sentences, active voice, terms defined at first use, no bold, no em-dashes).`,
+    `Make each title one short plain sentence.`,
+    `Before you call the tool, write every title and explanation to one file in $TMPDIR and run \`${FINDINGS_LINT} <file>\`.`,
+    `Fix what it counts and run it again until it exits 0.`,
   ].join(" ");
+}
+
+export function explainThreadTitle(pull: Pick<PullDetail, "repo" | "number" | "title">): string {
+  return truncate(`Explain ${pull.repo.slice(pull.repo.indexOf("/") + 1)}#${pull.number}: ${pull.title}`, TITLE_LIMIT);
+}
+
+export function explainPrompt(pull: PullDetail): string {
+  const body = pull.body.trim().length === 0 ? "(no description)" : truncate(pull.body.trim(), BODY_LIMIT);
+  return [
+    `${EXPLAIN_SKILL} Follow this skill's Reply rules for every answer you write in this thread.`,
+    "",
+    `You are the explain thread for ${pullKey(pull)} "${pull.title}" by @${pull.author.login}: ${pull.url}`,
+    `Branch ${pull.headRefName} into ${pull.baseRefName}, +${pull.additions}/-${pull.deletions} across ${pull.files.length} files. Head commit ${pull.headSha}.`,
+    "",
+    "PR description:",
+    body,
+    "",
+    "The user sends you parts of this PR: code from the diff, the description, comments, review comments, or review findings.",
+    "Help the user understand what each part means.",
+    `- Read the diff with \`gh pr diff ${pull.number} -R ${pull.repo}\`. Read a whole file at the PR head with \`gh api 'repos/${pull.repo}/contents/<path>?ref=${pull.headSha}' -H 'Accept: application/vnd.github.raw'\`.`,
+    "- Start with the plain meaning in one or two sentences. Then say why it matters in this PR.",
+    "- Define each technical term once, in plain words. Do not assume the user knows the codebase.",
+    `- Before you send each answer, write the draft to a file in $TMPDIR and run \`${EXPLAIN_LINT} <file>\`. It exits 1 and counts each em-dash, bold span, header, and bullet. Fix each one and run it again until it exits 0.`,
+    "- Explain the quoted text. Do not rewrite it unless the user asks.",
+    "- Do not edit files, check out branches, or post anything to GitHub.",
+    "",
+    "Reply now with one short sentence that says you are ready. Do not read the diff yet.",
+  ].join("\n");
+}
+
+const EXPLAIN_SOURCES: Record<ExplainRequest["source"], string> = {
+  code: "Code from the diff",
+  description: "The PR description",
+  comment: "A PR comment",
+  "review-comment": "A review comment",
+  finding: "A review finding",
+  other: "Text from the PR page",
+};
+
+function fenceFor(text: string): string {
+  const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((match) => match[0].length));
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
+export function explainMessage(request: ExplainRequest): string {
+  const fence = fenceFor(request.quote);
+  const question = request.question.trim();
+  return [
+    `${EXPLAIN_SOURCES[request.source]}: ${request.label}`,
+    "",
+    fence,
+    request.quote,
+    fence,
+    "",
+    question.length === 0 ? "What does this mean, and why is it here?" : question,
+    "",
+    `(Before you reply, write your draft to a file in $TMPDIR and run \`${EXPLAIN_LINT} <file>\` until it exits 0.)`,
+  ].join("\n");
 }
 
 function sleep(ms: number): Promise<void> {
@@ -425,6 +496,7 @@ export function createPlugin(deps: PluginDeps) {
       invalidations += 1;
       stalePulls.set(pullKey(pull), invalidations);
       if (listing !== undefined) listing = { ...listing, at: Number.NEGATIVE_INFINITY };
+      warmBoard();
     }
 
     const fileCache = new Map<string, FileContent>();
@@ -469,6 +541,14 @@ export function createPlugin(deps: PluginDeps) {
       return null;
     }
 
+    async function explainThreadFor(pull: PullKey) {
+      for (const threadId of store.explainThreadsForPull(pull)) {
+        const thread = await liveThread(threadId);
+        if (thread !== null) return thread;
+      }
+      return null;
+    }
+
     async function agentState(pull: PullKey, findings: number): Promise<AgentState> {
       const thread = await reviewThreadFor(pull);
       return {
@@ -478,29 +558,53 @@ export function createPlugin(deps: PluginDeps) {
       };
     }
 
-    let boardRun: { promise: Promise<Board>; generation: number; refresh: boolean } | null = null;
-    function board(refresh: boolean): Promise<Board> {
-      if (boardRun !== null && boardRun.generation === invalidations && (boardRun.refresh || !refresh)) return boardRun.promise;
-      const run = { promise: buildBoard(refresh), generation: invalidations, refresh };
-      boardRun = run;
+    interface BoardSource {
+      me: string;
+      repoList: string[];
+      listed: Cached<Listing>;
+      details: { pulls: PullSnapshot[]; errors: Board["errors"] };
+    }
+
+    // Board requests that arrive together share one GitHub check.
+    let sourceRun: { promise: Promise<BoardSource>; generation: number; refresh: boolean } | null = null;
+    function boardSource(refresh: boolean): Promise<BoardSource> {
+      if (sourceRun !== null && sourceRun.generation === invalidations && (sourceRun.refresh || !refresh)) return sourceRun.promise;
+      const run = { promise: fetchBoardSource(refresh), generation: invalidations, refresh };
+      sourceRun = run;
       run.promise
         .finally(() => {
-          if (boardRun === run) boardRun = null;
+          if (sourceRun === run) sourceRun = null;
         })
         .catch(() => undefined);
       return run.promise;
     }
 
-    async function buildBoard(refresh: boolean): Promise<Board> {
+    async function fetchBoardSource(refresh: boolean): Promise<BoardSource> {
       const repoList = await repos();
       const me = await viewer();
-      const queries = boardQueries(repoList);
-      const listed = await listBoard(queries, refresh);
+      const listed = await listBoard(boardQueries(repoList), refresh);
+      const unique = new Map([...listed.value.involved, ...listed.value.requested].map((entry) => [entry.id, entry]));
+      const details = await boardSnapshots([...unique.values()], refresh);
+      return { me, repoList, listed, details };
+    }
+
+    // Checks GitHub again soon after you act on a PR, so the board is ready when you go back to it.
+    let warmTimer: ReturnType<typeof setTimeout> | undefined;
+    function warmBoard(): void {
+      if (listing === undefined || disposed.signal.aborted) return;
+      clearTimeout(warmTimer);
+      warmTimer = setTimeout(() => {
+        boardSource(false).catch((error: unknown) => bb.log.warn(`could not check the board after an action: ${errorMessage(error)}`));
+      }, WARM_DELAY_MS);
+    }
+    disposed.signal.addEventListener("abort", () => clearTimeout(warmTimer));
+
+    // Builds the cards on every call, so findings, agents, and worktree changes are never older than the request.
+    async function board(refresh: boolean): Promise<Board> {
+      const { me, repoList, listed, details } = await boardSource(refresh);
       const { involved, requested } = listed.value;
       const involvedIds = new Set(involved.map((entry) => entry.id));
       const requestedIds = new Set(requested.map((entry) => entry.id));
-      const unique = new Map([...involved, ...requested].map((entry) => [entry.id, entry]));
-      const details = await boardSnapshots([...unique.values()], refresh);
       const errors = [...listed.value.errors, ...details.errors];
       const isMentioned = (pull: PullSnapshot) => involvedIds.has(pull.id) && pull.author?.login !== me && !hasTakenPart(pull, me);
       const pulls = details.pulls.filter(
@@ -656,6 +760,48 @@ export function createPlugin(deps: PluginDeps) {
       );
       bb.log.info(`started review thread ${thread.id} for ${pullKey(pull)}`);
       return { threadId: thread.id, created: true };
+    }
+
+    /** The explain thread only reads the PR through `gh`, so it runs in the project's default environment, not on the PR head. */
+    const explaining = new Map<string, Promise<{ threadId: string; created: boolean }>>();
+    async function openExplainOnce(pull: PullKey): Promise<{ threadId: string; created: boolean }> {
+      const existing = await explainThreadFor(pull);
+      if (existing !== null) return { threadId: existing.id, created: false };
+      const detail = await pullDetail(pull, false);
+      const [projectId, execution] = await Promise.all([resolveProjectId(detail.repo), reviewExecution()]);
+      const thread = await bb.sdk.threads.spawn({
+        projectId,
+        environment: { type: "project-default" },
+        ...execution,
+        title: explainThreadTitle(detail),
+        prompt: explainPrompt(detail),
+        pluginMetadata: { repo: pull.repo, number: pull.number, kind: "explain" },
+      });
+      store.recordExplainThread(thread.id, pull, deps.now());
+      publish(pull);
+      bb.log.info(`started explain thread ${thread.id} for ${pullKey(pull)}`);
+      return { threadId: thread.id, created: true };
+    }
+
+    function openExplain(pull: PullKey): Promise<{ threadId: string; created: boolean }> {
+      const key = pullKey(pull);
+      let pending = explaining.get(key);
+      if (pending === undefined) {
+        pending = openExplainOnce(pull).finally(() => explaining.delete(key));
+        explaining.set(key, pending);
+      }
+      return pending;
+    }
+
+    async function explain(pull: PullKey, request: ExplainRequest): Promise<{ threadId: string; delivery: "sent" | "queued" }> {
+      const { threadId } = await openExplain(pull);
+      const result = await bb.sdk.threads.send({
+        threadId,
+        mode: "auto",
+        input: [{ type: "text", text: explainMessage(request), mentions: [] }],
+      });
+      publish(pull);
+      return { threadId, delivery: result.delivery };
     }
 
     async function sendAddress(threadId: string, pull: PullDetail, withList: boolean, stack?: PullStack): Promise<"sent" | "queued"> {
@@ -814,6 +960,17 @@ export function createPlugin(deps: PluginDeps) {
       return { patch: await readDiff(worktreeGit(environment.path), changes, path, sha) };
     }
 
+    // Opens VS Code on the server machine, which is the user's machine in bb desktop.
+    async function openAddressWorktree(pull: PullKey): Promise<void> {
+      const thread = await addressThreadFor(pull);
+      const environment = thread === null ? null : await worktree(thread.id, null);
+      if (environment === null) throw new Error("The address thread's worktree is not available.");
+      const [command, args] = process.platform === "darwin" ? ["open", ["-a", "Visual Studio Code", environment.path]] : ["code", [environment.path]];
+      await deps.run(command, args, { timeoutMs: 30_000 }).catch((error: unknown) => {
+        throw new Error(`Could not open ${environment.path} in VS Code: ${errorMessage(error)}`);
+      });
+    }
+
     async function suggestionTarget(id: string) {
       const found = store.suggestion(id);
       if (found === null) throw new Error("That suggestion no longer exists.");
@@ -864,7 +1021,7 @@ export function createPlugin(deps: PluginDeps) {
 
     async function reviewState(pull: PullKey) {
       const findings = store.findings(pull);
-      const address = await addressThreadFor(pull);
+      const [address, explainer] = await Promise.all([addressThreadFor(pull), explainThreadFor(pull)]);
       return {
         agent: await agentState(pull, findings.filter((finding) => !finding.dismissed).length),
         findings,
@@ -874,28 +1031,42 @@ export function createPlugin(deps: PluginDeps) {
           running: address !== null && (address.status === "active" || address.status === "starting"),
         },
         suggestions: address === null ? [] : store.suggestions(pull, address.id),
+        explainAgent: {
+          threadId: explainer?.id ?? null,
+          running: explainer !== null && (explainer.status === "active" || explainer.status === "starting"),
+        },
       };
     }
 
+    /** Path of a bb project's checkout of `repo` on the server machine, so go to definition works without a review thread. */
+    async function localCheckout(repo: string): Promise<string | null> {
+      const [projects, hostId] = await Promise.all([bb.sdk.projects.list(), serverHostId().catch(() => null)]);
+      const pattern = new RegExp(`[:/]${repo.replaceAll(".", "\\.")}(\\.git)?/?$`, "i");
+      const project = projects.find((candidate) => candidate.gitRemoteUrl !== null && pattern.test(candidate.gitRemoteUrl));
+      const sources = (project?.sources ?? []).filter((source) => source.hostId === hostId);
+      return (sources.find((source) => source.isDefault) ?? sources[0])?.path ?? null;
+    }
+
+    const goplsSessions = createGoplsSessions();
+    bb.onDispose(() => goplsSessions.dispose());
     const externalFiles = new Set<string>();
     async function definition(input: z.infer<(typeof rpcContract)["definition"]["input"]>) {
       const thread = await reviewThreadFor(input);
       const environment = thread === null ? null : await worktree(thread.id, null);
-      if (environment === null) {
+      const root = environment?.path ?? (await localCheckout(input.repo));
+      if (root === null) {
         return {
           symbol: input.symbol,
           source: "search" as const,
           definitions: [],
-          message:
-            thread === null
-              ? "Go to definition needs the review thread's worktree. Click Run review to start one."
-              : "The review worktree is still being prepared. Try again in a moment.",
+          message: `Go to definition needs a checkout of ${input.repo}. Add it as a bb project, or click Run review.`,
         };
       }
       const detail = await pullDetail(input, false);
-      const head = (await deps.run("git", ["rev-parse", "HEAD"], { cwd: environment.path, timeoutMs: 15_000 })).trim();
-      const result = await findDefinitions(deps.run, await resolveTool("gopls"), {
-        worktree: environment.path,
+      const head = (await deps.run("git", ["rev-parse", "HEAD"], { cwd: root, timeoutMs: 15_000 })).trim();
+      const gopls = await resolveTool("gopls");
+      const result = await findDefinitions(deps.run, gopls === null ? null : { path: gopls, sessions: goplsSessions }, {
+        worktree: root,
         sha: input.sha,
         atHead: input.sha === detail.headSha && head === detail.headSha,
         path: input.path,
@@ -922,7 +1093,8 @@ export function createPlugin(deps: PluginDeps) {
       fileAt: ({ repo, sha, path }) => fileAt(repo, sha, path),
       externalFile: ({ path }) => externalFile(path),
       reviewState: (pull) => reviewState(pull),
-      pullForThread: ({ threadId }) => store.pullForThread(threadId) ?? store.pullForAddressThread(threadId),
+      pullForThread: ({ threadId }) =>
+        store.pullForThread(threadId) ?? store.pullForAddressThread(threadId) ?? store.pullForExplainThread(threadId),
       openReview: (pull) => openReview(pull),
       runReview: (pull) => runReview(pull),
       definition: (input) => definition(input),
@@ -999,6 +1171,8 @@ export function createPlugin(deps: PluginDeps) {
         publish(pull);
         return {};
       },
+      openExplain: (pull) => openExplain(pull),
+      explain: ({ repo, number, ...request }) => explain({ repo, number }, request),
       submitAddress: (pull) => submitAddress(pull),
       postConversationComment: async ({ repo, number, body }) => {
         await github.postIssueComment(repo, number, body);
@@ -1008,6 +1182,10 @@ export function createPlugin(deps: PluginDeps) {
       },
       addressChanges: ({ repo, number, refresh }) => addressChanges({ repo, number }, refresh === true),
       addressDiff: ({ repo, number, path, sha }) => addressDiff({ repo, number }, path, sha),
+      openAddressWorktree: async (pull) => {
+        await openAddressWorktree(pull);
+        return {};
+      },
     });
 
     async function recordFixes(threadId: string, fixes: ReadonlyArray<z.infer<typeof fixInputSchema>>) {
@@ -1119,7 +1297,7 @@ export function createPlugin(deps: PluginDeps) {
       name: FINDINGS_TOOL,
       description:
         "Record the findings of a code review of this thread's pull request so PR Board highlights them in the user's diff view. Each call replaces the findings recorded before unless replace is false.",
-      instructions: `This thread reviews a pull request for PR Board. After a code review, call ${FINDINGS_TOOL} once with every finding, using repository-relative paths and line numbers from the PR's head (side "additions") or base (side "deletions").`,
+      instructions: `This thread reviews a pull request for PR Board. After a code review, call ${FINDINGS_TOOL} once with every finding, using repository-relative paths and line numbers from the PR's head (side "additions") or base (side "deletions"). Each title and body becomes a PR review comment, so write them by the Document rules in ${SIMPLE_ENGLISH_DIR}/SKILL.md.`,
       presentation: { label: { pending: "Recording review findings", completed: "Recorded review findings" } },
       parameters: z.object({
         findings: z.array(findingInputSchema).max(200),
@@ -1161,7 +1339,8 @@ export function createPlugin(deps: PluginDeps) {
     bb.agents.configure((context) => {
       const { repo, number, kind } = context.pluginMetadata;
       const isPullThread = typeof repo === "string" && /^[\w.-]+\/[\w.-]+$/.test(repo) && typeof number === "number";
-      return { tools: !isPullThread ? [] : kind === "address" ? [SUGGESTIONS_TOOL, RECORD_FIX_TOOL] : [FINDINGS_TOOL], skills: [SKILL_NAME] };
+      const tools = !isPullThread || kind === "explain" ? [] : kind === "address" ? [SUGGESTIONS_TOOL, RECORD_FIX_TOOL] : [FINDINGS_TOOL];
+      return { tools, skills: [SKILL_NAME] };
     });
 
     const jsonOption = { json: { type: "boolean", description: "Print the result as JSON" } } as const;

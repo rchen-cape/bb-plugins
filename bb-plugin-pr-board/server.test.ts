@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createFakePluginHost, makePluginAgentConfigurationContext, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { fakeRepo } from "./changes.fixture";
 import type { RunOptions } from "./github";
-import { FINDINGS_TOOL, RECORD_FIX_TOOL, REVIEW_SKILL, SUGGESTIONS_TOOL, createPlugin, parsePullArgument, reviewMessage, summaryPrompt } from "./server";
+import { EXPLAIN_LINT, EXPLAIN_SKILL, FINDINGS_LINT, FINDINGS_TOOL, RECORD_FIX_TOOL, REVIEW_SKILL, SUGGESTIONS_TOOL, createPlugin, parsePullArgument, reviewMessage, summaryPrompt } from "./server";
 
 const HEAD = "1".repeat(40);
 const BASE = "2".repeat(40);
@@ -147,6 +147,7 @@ function fakeRunner(pullResponse: unknown = PULL_RESPONSE, onGraphql?: (variable
     }
     if (args[0] === "api" && String(args[1]).includes("/compare/")) return `${MERGE_BASE}\n`;
     if (args[0] === "pr" && args[1] === "checkout") return "";
+    if (command === "open" || command === "code") return "";
     if (args[0] === "api" && args[1] === "--method" && /\/issues\/\d+\/comments$/.test(String(args[3]))) return "{}";
     throw new Error(`unexpected command ${command} ${args.join(" ")}`);
   });
@@ -215,6 +216,12 @@ describe("prompts", () => {
     const message = reviewMessage({ repo: "acme/app", number: 7, baseRefName: "main" });
     expect(message.startsWith(`${REVIEW_SKILL} review pr 7`)).toBe(true);
     expect(message).toContain(FINDINGS_TOOL);
+  });
+
+  it("asks for findings in Simple English and lints them before they are recorded", () => {
+    const message = reviewMessage({ repo: "acme/app", number: 7, baseRefName: "main" });
+    expect(message).toContain("~/.claude/skills/simple-english/SKILL.md");
+    expect(message).toContain(`${FINDINGS_LINT} <file>`);
   });
 });
 
@@ -316,6 +323,17 @@ describe("board", () => {
       const start = runner.graphqlVariables().length;
       await board(harness);
       expect(since(runner, start)).toEqual({ lists: 2, ids: ["PR_3"] });
+    });
+
+    it("checks again soon after you act on a PR, so going back to the board needs no new check", async () => {
+      const { harness, runner } = setup(() => clock);
+      await board(harness);
+      const start = runner.graphqlVariables().length;
+      await harness.behavior.callRpc("postConversationComment", { repo: "acme/app", number: 3, body: "Thanks" });
+      await vi.waitFor(() => expect(since(runner, start)).toEqual({ lists: 2, ids: ["PR_3"] }), { timeout: 3_000 });
+      const back = runner.graphqlVariables().length;
+      await board(harness);
+      expect(since(runner, back)).toEqual({ lists: 0, ids: [] });
     });
 
     it("checks GitHub on every minute tick even when a check takes a few seconds", async () => {
@@ -434,6 +452,113 @@ describe("review threads", () => {
     const second = await harness.behavior.callRpc("openReview", { repo: "acme/app", number: 7 });
     expect(second).toEqual({ threadId: "thr_review", created: false });
     expect(harness.inspection.sdk.callsTo("threads.spawn")).toHaveLength(1);
+  });
+});
+
+describe("explain threads", () => {
+  it("spawns one read-only thread per PR in the project's default environment that loads the Simple English skill", async () => {
+    const { harness } = setup();
+    const first = await harness.behavior.callRpc("openExplain", { repo: "acme/app", number: 7 });
+    expect(first).toEqual({ threadId: "thr_review", created: true });
+
+    const [spawn] = harness.inspection.sdk.callsTo("threads.spawn");
+    expect(spawn?.[0]).toMatchObject({
+      projectId: "proj_app",
+      environment: { type: "project-default" },
+      title: "Explain app#7: Add thing",
+      pluginMetadata: { repo: "acme/app", number: 7, kind: "explain" },
+      providerId: "claude-code",
+    });
+    const prompt = (spawn?.[0] as { prompt: string }).prompt;
+    expect(prompt.startsWith(`${EXPLAIN_SKILL} `)).toBe(true);
+    expect(prompt).toContain("gh pr diff 7 -R acme/app");
+    expect(prompt).toContain("Do not edit files");
+    expect(prompt).toContain(`${EXPLAIN_LINT} <file>`);
+
+    const second = await harness.behavior.callRpc("openExplain", { repo: "acme/app", number: 7 });
+    expect(second).toEqual({ threadId: "thr_review", created: false });
+    expect(harness.inspection.sdk.callsTo("threads.spawn")).toHaveLength(1);
+    const state = (await harness.behavior.callRpc("reviewState", { repo: "acme/app", number: 7 })) as { explainAgent: unknown };
+    expect(state.explainAgent).toEqual({ threadId: "thr_review", running: false });
+  });
+
+  it("sends the selection, where it came from, and the question to the explain thread", async () => {
+    const { harness } = setup();
+    const result = await harness.behavior.callRpc("explain", {
+      repo: "acme/app",
+      number: 7,
+      source: "code",
+      label: "a.go, new line 2",
+      quote: "x := ```y```",
+      question: "",
+    });
+    expect(result).toEqual({ threadId: "thr_review", delivery: "queued" });
+    const [send] = harness.inspection.sdk.callsTo("threads.send");
+    expect((send?.[0] as { input: Array<{ text: string }> }).input[0]?.text).toBe(
+      [
+        "Code from the diff: a.go, new line 2",
+        "",
+        "````",
+        "x := ```y```",
+        "````",
+        "",
+        "What does this mean, and why is it here?",
+        "",
+        `(Before you reply, write your draft to a file in $TMPDIR and run \`${EXPLAIN_LINT} <file>\` until it exits 0.)`,
+      ].join("\n"),
+    );
+  });
+
+  it("gives the explain thread no PR Board tools", async () => {
+    const { harness } = setup();
+    const explain = await harness.behavior.resolveAgentConfiguration(
+      makePluginAgentConfigurationContext({ pluginMetadata: { repo: "acme/app", number: 7, kind: "explain" } }),
+    );
+    expect(explain.tools).toEqual([]);
+  });
+});
+
+describe("go to definition", () => {
+  function definitionSetup(sources: Array<{ hostId: string; path: string; isDefault: boolean }>) {
+    const runner = fakeRunner();
+    const run = vi.fn(async (command: string, args: readonly string[], options: RunOptions) => {
+      if (command !== "git") return runner.run(command, args, options);
+      runner.calls.push({ command, args, options });
+      if (args[0] === "rev-parse") return `${HEAD}\n`;
+      if (args[0] === "cat-file") return "";
+      if (args[0] === "grep") return `${HEAD}:pkg/run.go\u00004\u0000func Run() {}\n${HEAD}:a.go\u00002\u0000\tRun()\n`;
+      throw new Error(`unexpected git ${args.join(" ")}`);
+    });
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "pr-board",
+      agentSkillIds: ["pr-board"],
+      settings: { repos: "acme/app" },
+      sdk: {
+        projects: { list: async () => [{ id: "proj_app", gitRemoteUrl: "git@github.com:acme/app.git", sources }] as never },
+        system: { config: async () => ({ primaryHostId: "host_1" }) as never },
+      },
+    });
+    createPlugin({ run, pollMs: 1, now: Date.now })(bb);
+    const lookup = () =>
+      harness.behavior.callRpc("definition", { repo: "acme/app", number: 7, sha: HEAD, path: "a.go", line: 2, character: 1, symbol: "Run" });
+    return { runner, lookup };
+  }
+
+  it("searches the project's own checkout when the PR has no review thread", async () => {
+    const { runner, lookup } = definitionSetup([
+      { hostId: "host_2", path: "/elsewhere/app", isDefault: true },
+      { hostId: "host_1", path: "/src/app", isDefault: false },
+    ]);
+    expect(await lookup()).toMatchObject({ source: "search", definitions: [{ path: "pkg/run.go", line: 4 }], message: null });
+    expect(runner.calls.find((call) => call.args[0] === "grep")?.options.cwd).toBe("/src/app");
+  });
+
+  it("says what is missing when there is no checkout on this machine", async () => {
+    const { lookup } = definitionSetup([{ hostId: "host_2", path: "/elsewhere/app", isDefault: true }]);
+    expect(await lookup()).toMatchObject({
+      definitions: [],
+      message: "Go to definition needs a checkout of acme/app. Add it as a bb project, or click Run review.",
+    });
   });
 });
 
@@ -816,12 +941,15 @@ describe("address changes", () => {
     await rm(worktree, { recursive: true, force: true });
   });
 
-  function changesSetup() {
+  function changesSetup(afterGit?: (args: readonly string[]) => Promise<void> | void) {
     const runner = fakeRunner();
     const repo = fakeRepo(HEAD);
-    const run = vi.fn(async (command: string, args: readonly string[], options: RunOptions) =>
-      command === "git" ? repo.git(args, options.okExitCodes) : runner.run(command, args, options),
-    );
+    const run = vi.fn(async (command: string, args: readonly string[], options: RunOptions) => {
+      if (command !== "git") return runner.run(command, args, options);
+      const output = await repo.git(args, options.okExitCodes);
+      await afterGit?.(args);
+      return output;
+    });
     const thread = makeThreadResponse({ id: "thr_address", environmentId: "env_1", status: "idle", deletedAt: null, archivedAt: null });
     const { bb, harness } = createFakePluginHost({
       pluginId: "pr-board",
@@ -844,7 +972,7 @@ describe("address changes", () => {
         comments: Array<{ commentId: string; state: string; sha: string | null; sources: string[]; files: string[] }>;
       }>;
     const recordFix = (fixes: unknown[], threadId = "thr_address") => harness.behavior.callAgentTool(RECORD_FIX_TOOL, { fixes }, { threadId });
-    return { harness, repo, changes, recordFix };
+    return { harness, repo, runner, changes, recordFix };
   }
 
   async function started() {
@@ -924,6 +1052,14 @@ describe("address changes", () => {
     expect(await diff("a.go", sha)).toEqual({ patch: expect.stringContaining(`show --no-ext-diff -M --format= ${sha} -- a.go`) });
   });
 
+  it("opens the address thread's worktree in VS Code and refuses PRs without one", async () => {
+    const { harness, runner } = await started();
+    await expect(harness.behavior.callRpc("openAddressWorktree", { repo: "acme/app", number: 8 })).rejects.toThrow("worktree is not available");
+    expect(await harness.behavior.callRpc("openAddressWorktree", { repo: "acme/app", number: 7 })).toEqual({});
+    const expected = process.platform === "darwin" ? { command: "open", args: ["-a", "Visual Studio Code", worktree] } : { command: "code", args: [worktree] };
+    expect(runner.calls.filter((call) => call.command === expected.command)).toEqual([expect.objectContaining(expected)]);
+  });
+
   it("shows address counts on the cards of PRs with an address thread and never fails the board", async () => {
     const { harness, repo } = changesSetup();
     await harness.behavior.callRpc("addressComments", { repo: "acme/app", number: 1 });
@@ -941,6 +1077,41 @@ describe("address changes", () => {
     repo.state.fail = true;
     await harness.behavior.callRpc("postConversationComment", { repo: "acme/app", number: 1, body: "Thanks" });
     expect((await board()).find(([number]) => number === 1)).toEqual([1, null]);
+  });
+
+  it("shows worktree changes made while an earlier board load was still counting them", async () => {
+    let hold: Promise<void> | null = null;
+    let reached = () => {};
+    const { harness, repo } = changesSetup(async (args) => {
+      if (hold !== null && args[0] === "status") {
+        reached();
+        await hold;
+      }
+    });
+    await harness.behavior.callRpc("addressComments", { repo: "acme/app", number: 1 });
+    await vi.waitFor(() => expect(harness.inspection.sdk.callsTo("threads.send")).toHaveLength(1));
+    const board = () => harness.behavior.callRpc("board", { refresh: false }) as Promise<{ cards: Array<{ number: number; address: unknown }> }>;
+    const idle = () => harness.behavior.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: "thr_address" }), lastAssistantText: null });
+    const addressOf = async (load: ReturnType<typeof board>) => (await load).cards.find((card) => card.number === 1)?.address;
+    await board();
+
+    const atGate = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let release = () => {};
+    hold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await idle();
+    const inFlight = board();
+    await atGate;
+    repo.state.status = " M a.go\0";
+    await idle();
+    hold = null;
+    const after = board();
+    release();
+    expect(await addressOf(inFlight)).toEqual({ uncommitted: 0, unpushed: 0, pushed: 0 });
+    expect(await addressOf(after)).toEqual({ uncommitted: 1, unpushed: 0, pushed: 0 });
   });
 
   it("publishes an update when the address thread goes idle", async () => {

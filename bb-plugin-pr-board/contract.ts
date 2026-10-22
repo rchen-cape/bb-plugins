@@ -211,8 +211,20 @@ const reviewStateSchema = z.object({
   drafts: z.array(draftSchema),
   addressAgent: addressAgentSchema,
   suggestions: z.array(suggestionSchema),
+  explainAgent: addressAgentSchema,
 });
 export type ReviewState = z.infer<typeof reviewStateSchema>;
+
+export const explainSourceSchema = z.enum(["code", "description", "comment", "review-comment", "finding", "other"]);
+export type ExplainSource = z.infer<typeof explainSourceSchema>;
+
+export const explainRequestSchema = z.object({
+  source: explainSourceSchema,
+  label: z.string().trim().min(1).max(500),
+  quote: z.string().trim().min(1).max(20_000),
+  question: z.string().trim().max(4_000),
+});
+export type ExplainRequest = z.infer<typeof explainRequestSchema>;
 
 export const changeLetterSchema = z.enum(["M", "A", "D", "R", "U"]);
 export type ChangeLetter = z.infer<typeof changeLetterSchema>;
@@ -393,6 +405,14 @@ export const rpcContract = defineRpcContract({
       ]),
     output: empty,
   },
+  openExplain: {
+    input: z.object(pullRef).strict(),
+    output: z.object({ threadId: z.string(), created: z.boolean() }),
+  },
+  explain: {
+    input: z.object({ ...pullRef, ...explainRequestSchema.shape }).strict(),
+    output: z.object({ threadId: z.string(), delivery: z.enum(["sent", "queued"]) }),
+  },
   submitAddress: {
     input: z.object(pullRef).strict(),
     output: z.object({ threadId: z.string(), delivery: z.enum(["sent", "queued"]) }),
@@ -408,5 +428,9 @@ export const rpcContract = defineRpcContract({
   addressDiff: {
     input: z.object({ ...pullRef, path: pathSchema, sha: shaSchema.nullable() }).strict(),
     output: z.object({ patch: z.string() }),
+  },
+  openAddressWorktree: {
+    input: z.object(pullRef).strict(),
+    output: empty,
   },
 });

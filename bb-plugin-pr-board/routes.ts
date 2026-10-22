@@ -17,3 +17,4 @@ export function parseWorkspacePath(subPath: string): PullRoute | null {
 
 export const REVIEW_THREAD_TAB = { panelId: BOARD_PANEL, id: "thread" } as const;
 export const ADDRESS_THREAD_TAB = { panelId: BOARD_PANEL, id: "address-thread" } as const;
+export const EXPLAIN_THREAD_TAB = { panelId: BOARD_PANEL, id: "explain-thread" } as const;

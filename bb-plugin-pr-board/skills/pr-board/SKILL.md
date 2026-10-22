@@ -11,7 +11,11 @@ and opens one review thread per PR. The optional Repositories setting limits it
 to those repositories. A review thread works in a worktree on the PR's
 head, summarizes the PR, then runs `/thermo-nuclear-code-quality-review`. A
 separate address-comments thread suggests code changes and replies for the PR's
-comments without changing files, unless the user asks it to fix one.
+comments without changing files, unless the user asks it to fix one. An
+explain thread starts by itself when the user opens a PR's page. It answers
+questions about text the user selects on the page (code, the description,
+comments, review comments, findings) in plain English, with the `/simple-english`
+skill, and only reads.
 
 ## Commands
 

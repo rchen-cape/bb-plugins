@@ -8,6 +8,7 @@ import { highlightCss, type DiffStyle } from "../highlight";
 import { isCommentable } from "../patch";
 import { AnnotationView, annotationKey, FindingCard, ThreadCard, type AnnotationData, type Composer, type ReviewActions } from "./Annotations";
 import { identifierAt, isModifierClick, useModifierUnderline, useScrollToLine, type LineFocus } from "./code";
+import { explainSource } from "./Explain";
 import { Button } from "./ui/button";
 import { Icon } from "./ui/icon";
 import { useCached } from "./cache";
@@ -161,8 +162,13 @@ export function DiffPane({
     return list;
   }, [composer, detail.headSha, drafts, inlineFindings, inlineThreads, loaded]);
 
-  const handlers = useRef({ gutter: (_range: SelectedLineRange) => {}, token: (_props: TokenProps, _event: MouseEvent) => {} });
-  handlers.current.gutter = (range) => {
+  const handlers = useRef({
+    token: (_props: TokenProps, _event: MouseEvent) => {},
+    lines: (_range: SelectedLineRange | null) => {},
+  });
+  // Clicking or dragging line numbers and clicking + both end in a line selection, so both open the comment editor here.
+  handlers.current.lines = (range) => {
+    if (range === null) return;
     const side = range.endSide ?? range.side ?? "additions";
     const startLine = Math.min(range.start, range.end);
     const endLine = Math.max(range.start, range.end);
@@ -204,8 +210,10 @@ export function DiffPane({
       enableLineSelection: true,
       lineHoverHighlight: "both",
       unsafeCSS: css,
-      onGutterUtilityClick: (range) => handlers.current.gutter(range),
+      // Without this handler, + does not start a selection. The comment opens from onLineSelectionEnd instead.
+      onGutterUtilityClick: () => {},
       onTokenClick: (props, event) => handlers.current.token(props, event),
+      onLineSelectionEnd: (range) => handlers.current.lines(range),
       onTokenEnter: (props, event) => underline.enter(props.tokenElement, isModifierClick(event)),
       onTokenLeave: (props) => underline.leave(props.tokenElement),
     }),
@@ -240,12 +248,17 @@ export function DiffPane({
   if (fileDiff === null) return <p className="p-4 text-sm text-muted-foreground">Loading diff…</p>;
 
   return (
-    <div ref={host} className="pb-24">
+    <div ref={host} className="pb-24" {...explainSource("code", file.path)}>
       {fileFindings.length + otherThreads.length === 0 ? null : (
         <div className="space-y-1 border-b border-border py-2">
           {fileFindings.map((finding) => (
-            <div key={finding.id} className="relative">
-              <FindingCard finding={finding} outdated={finding.headSha !== null && finding.headSha !== detail.headSha} actions={actions} />
+            <div key={finding.id} className="relative" data-anchor={`finding:${finding.id}`}>
+              <FindingCard
+                finding={finding}
+                outdated={finding.headSha !== null && finding.headSha !== detail.headSha}
+                focused={focus?.anchor === `finding:${finding.id}`}
+                actions={actions}
+              />
               {finding.endLine !== null && canExpand && !fullFile ? (
                 <Button size="sm" variant="ghost" className="absolute right-4 top-3 h-6 text-xs" onClick={onShowFullFile}>
                   <Icon name="Maximize2" className="size-3" />
@@ -255,11 +268,11 @@ export function DiffPane({
             </div>
           ))}
           {otherThreads.map((thread) => (
-            <div key={thread.id}>
+            <div key={thread.id} data-anchor={`thread:${thread.id}`}>
               <p className="px-3 pt-1 text-[11px] text-muted-foreground">
                 {thread.isOutdated || thread.line === null ? "Outdated comment" : `Comment on line ${thread.line}, outside the shown hunks`}
               </p>
-              <ThreadCard thread={thread} actions={actions} />
+              <ThreadCard thread={thread} focused={focus?.anchor === `thread:${thread.id}`} actions={actions} />
             </div>
           ))}
         </div>
@@ -272,7 +285,9 @@ export function DiffPane({
         disableWorkerPool
         renderAnnotation={(annotation) =>
           annotation.metadata === undefined ? null : (
-            <AnnotationView key={annotationKey(annotation.metadata)} data={annotation.metadata} actions={actions} />
+            <div key={annotationKey(annotation.metadata)} data-anchor={annotationKey(annotation.metadata)}>
+              <AnnotationView data={annotation.metadata} focused={focus?.anchor === annotationKey(annotation.metadata)} actions={actions} />
+            </div>
           )
         }
       />
