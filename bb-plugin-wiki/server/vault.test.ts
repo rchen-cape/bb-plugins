@@ -8,6 +8,8 @@ import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createStore } from "./store";
 import {
+  COMMIT_IDLE_MS,
+  COMMIT_MAX_WAIT_MS,
   VaultError,
   buildIndexedDoc,
   createVault,
@@ -48,7 +50,7 @@ async function walkNames(folder: string): Promise<string[]> {
   return entries.map(String).sort();
 }
 
-interface SetupOptions extends Partial<Omit<VaultDeps, "store" | "log" | "gitEnabled">> {
+interface SetupOptions extends Partial<Omit<VaultDeps, "store" | "log">> {
   git?: boolean;
 }
 
@@ -225,16 +227,16 @@ describe("writeDoc", () => {
   it("writes unconditionally when no sha256 is given, creating folders", async () => {
     const { vault, read, store } = await setup();
     const first = await vault.writeDoc("projects/new-doc", "# New doc\n");
-    expect(first).toEqual({ outcome: "written", sha256: sha("# New doc\n") });
+    expect(first).toEqual({ outcome: "written", sha256: sha("# New doc\n"), changed: true });
     expect(await read("projects/new-doc.md")).toBe("# New doc\n");
     const second = await vault.writeDoc("projects/new-doc", "# Renamed\n", undefined);
-    expect(second).toEqual({ outcome: "written", sha256: sha("# Renamed\n") });
+    expect(second).toEqual({ outcome: "written", sha256: sha("# Renamed\n"), changed: true });
     expect(store.getDoc("projects/new-doc")).toMatchObject({ title: "Renamed", sha256: sha("# Renamed\n") });
   });
 
   it("creates only when the sha256 is null", async () => {
     const { vault, put, read } = await setup();
-    expect(await vault.writeDoc("fresh", "fresh\n", null)).toEqual({ outcome: "written", sha256: sha("fresh\n") });
+    expect(await vault.writeDoc("fresh", "fresh\n", null)).toEqual({ outcome: "written", sha256: sha("fresh\n"), changed: true });
     await put("taken.md", "original\n");
     expect(await vault.writeDoc("taken", "replacement\n", null)).toEqual({ outcome: "conflict" });
     expect(await read("taken.md")).toBe("original\n");
@@ -245,7 +247,7 @@ describe("writeDoc", () => {
     await put("doc.md", "v1\n");
     expect(await vault.writeDoc("doc", "v2\n", sha("stale\n"))).toEqual({ outcome: "conflict" });
     expect(await read("doc.md")).toBe("v1\n");
-    expect(await vault.writeDoc("doc", "v2\n", sha("v1\n"))).toEqual({ outcome: "written", sha256: sha("v2\n") });
+    expect(await vault.writeDoc("doc", "v2\n", sha("v1\n"))).toEqual({ outcome: "written", sha256: sha("v2\n"), changed: true });
     expect(await read("doc.md")).toBe("v2\n");
     expect(await vault.writeDoc("missing", "x\n", sha("v1\n"))).toEqual({ outcome: "conflict" });
     expect(await exists(file("missing.md"))).toBe(false);
@@ -286,8 +288,19 @@ describe("writeDoc", () => {
     const { vault, put, file } = await setup();
     await put("doc.md", "same\n");
     await utimes(file("doc.md"), PAST, PAST);
-    expect(await vault.writeDoc("doc", "same\n", sha("same\n"))).toEqual({ outcome: "written", sha256: sha("same\n") });
+    await vault.syncAll();
+    expect(await vault.writeDoc("doc", "same\n", sha("same\n"))).toEqual({ outcome: "written", sha256: sha("same\n"), changed: false });
     expect((await stat(file("doc.md"))).mtimeMs).toBe(PAST.getTime());
+  });
+
+  it("reports a change when unchanged content brings a stale index up to date", async () => {
+    const { vault, put, store } = await setup();
+    await put("doc.md", "# Old\n");
+    await vault.syncAll();
+    await put("doc.md", "# New title\n");
+    expect(await vault.writeDoc("doc", "# New title\n", sha("# New title\n"))).toEqual({ outcome: "written", sha256: sha("# New title\n"), changed: true });
+    expect(store.getDoc("doc")?.title).toBe("New title");
+    expect(await vault.writeDoc("doc", "# New title\n", sha("# New title\n"))).toMatchObject({ changed: false });
   });
 
   it("refuses unsafe slugs and folders that lead outside the Wiki", async () => {
@@ -901,6 +914,171 @@ describe("commit", () => {
       await writeFile(path.join(root, ".git"), "gitdir: /nonexistent/repo\n");
       await expect(vault.commit("Wiki: doc", ["doc.md"])).resolves.toBeUndefined();
       expect(warnings.some((line) => line.startsWith("Wiki git"))).toBe(true);
+    });
+  });
+});
+
+describe("commitSoon", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+  });
+
+  const editMessage = (store: { getDoc: (slug: string) => { title: string } | null }, slug: string) => () => `Wiki: edit ${store.getDoc(slug)?.title ?? slug}`;
+
+  it("never schedules a commit when git history is off", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { vault, store, root } = await setup({ git: false });
+    await vault.writeDoc("doc", "# Doc\n");
+    await vault.commitSoon("doc.md", editMessage(store, "doc"));
+    expect(vault.pendingCommits()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(COMMIT_MAX_WAIT_MS);
+    await vault.flushCommits();
+    expect(await exists(path.join(root, ".git"))).toBe(false);
+  });
+
+  describe.skipIf(!gitAvailable)("with git", () => {
+    function isolateGit() {
+      vi.stubEnv("GIT_CONFIG_GLOBAL", "/dev/null");
+      vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+    }
+
+    function log(root: string): string[] {
+      try {
+        return execFileSync("git", ["-C", root, "log", "--format=%s"], { encoding: "utf8", env: process.env, stdio: ["ignore", "pipe", "ignore"] })
+          .trim()
+          .split("\n")
+          .filter((line) => line !== "");
+      } catch {
+        return [];
+      }
+    }
+
+    async function editing() {
+      isolateGit();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const context = await setup({ git: true });
+      const save = async (content: string) => {
+        await context.vault.writeDoc("doc", content);
+        await context.vault.commitSoon("doc.md", editMessage(context.store, "doc"));
+      };
+      return { ...context, save };
+    }
+
+    it("coalesces saves into one commit after 30 s without saves, titled at commit time", async () => {
+      const { vault, root, save } = await editing();
+      await save("# Draft\n\nOne.\n");
+      await vi.advanceTimersByTimeAsync(20_000);
+      await save("# Draft\n\nOne. Two.\n");
+      await vi.advanceTimersByTimeAsync(20_000);
+      await save("# Final\n\nOne. Two. Three.\n");
+      await vi.advanceTimersByTimeAsync(COMMIT_IDLE_MS - 1);
+      expect(vault.pendingCommits()).toEqual(["doc.md"]);
+      expect(log(root)).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(vault.pendingCommits()).toEqual([]);
+      await vault.flushCommits();
+      expect(log(root)).toEqual(["Wiki: edit Final"]);
+      await vi.advanceTimersByTimeAsync(COMMIT_MAX_WAIT_MS);
+      await vault.flushCommits();
+      expect(log(root)).toEqual(["Wiki: edit Final"]);
+    });
+
+    it("commits at most 5 minutes after the first uncommitted save while saves keep coming", async () => {
+      const { vault, root, save } = await editing();
+      let elapsed = 0;
+      for (let step = 0; elapsed < COMMIT_MAX_WAIT_MS; step += 1) {
+        await save(`# Doc\n\nStep ${step}.\n`);
+        expect(log(root)).toEqual([]);
+        await vi.advanceTimersByTimeAsync(20_000);
+        elapsed += 20_000;
+      }
+      expect(vault.pendingCommits()).toEqual([]);
+      await vault.flushCommits();
+      expect(log(root)).toEqual(["Wiki: edit Doc"]);
+    });
+
+    it("commits a pending edit before another commit or write touches the path", async () => {
+      const { vault, root, save } = await editing();
+      await save("# Doc\n\nTyped.\n");
+      await vault.commit("Wiki: save Doc before renaming it", ["doc.md"]);
+      expect(log(root)).toEqual(["Wiki: edit Doc"]);
+      await save("# Doc\n\nTyped more.\n");
+      await vault.appendBlock("doc", "Notes", "- accepted");
+      await vault.commit("Wiki: accept → Doc", ["doc.md"]);
+      expect(log(root)).toEqual(["Wiki: accept → Doc", "Wiki: edit Doc", "Wiki: edit Doc"]);
+      await save("# Doc\n\nTyped again.\n");
+      await vault.commit("Wiki: everything", []);
+      expect(log(root).slice(0, 2)).toEqual(["Wiki: everything", "Wiki: edit Doc"]);
+      expect(vault.pendingCommits()).toEqual([]);
+      await vi.advanceTimersByTimeAsync(COMMIT_MAX_WAIT_MS);
+      await vault.flushCommits();
+      expect(log(root)).toHaveLength(5);
+    });
+
+    it("commits pending edits right away on flush and before a delete", async () => {
+      const { vault, root, save } = await editing();
+      await save("# Doc\n\nTyped.\n");
+      await vault.flushCommits();
+      expect(log(root)).toEqual(["Wiki: edit Doc"]);
+      await save("# Doc\n\nLast words.\n");
+      await vault.deleteDoc("doc");
+      expect(log(root)).toEqual(["Wiki: edit Doc", "Wiki: edit Doc"]);
+      expect(execFileSync("git", ["-C", root, "show", "HEAD:doc.md"], { encoding: "utf8", env: process.env })).toBe("# Doc\n\nLast words.\n");
+    });
+
+    it("commits a pending edit in its own Wiki folder after the folder setting changes", async () => {
+      const { vault, root, save, switchRoot } = await editing();
+      await save("# Doc\n\nTyped in A.\n");
+      const next = await tempDir("wiki-next-");
+      switchRoot(next);
+      await vi.advanceTimersByTimeAsync(COMMIT_IDLE_MS);
+      await vault.flushCommits();
+      expect(log(root)).toEqual(["Wiki: edit Doc"]);
+      switchRoot(root);
+      await save("# Doc\n\nTyped in A once more.\n");
+      switchRoot(next);
+      await save("# Doc\n\nTyped in B.\n");
+      await vault.flushCommits();
+      expect(log(root)).toEqual(["Wiki: edit Doc", "Wiki: edit Doc"]);
+      expect(log(next)).toEqual(["Wiki: edit Doc"]);
+      expect(execFileSync("git", ["-C", root, "show", "HEAD:doc.md"], { encoding: "utf8", env: process.env })).toBe("# Doc\n\nTyped in A once more.\n");
+    });
+
+    it("commits a save that was still scheduling when the plugin closed and leaves no timers behind", async () => {
+      isolateGit();
+      let release: () => void = () => undefined;
+      let held: Promise<void> | null = null;
+      let disposed = false;
+      const { vault, root, store, warnings } = await setup({
+        gitEnabled: async () => {
+          if (held !== null) await held;
+          if (disposed) throw new Error("disposed");
+          return true;
+        },
+      });
+      await vault.writeDoc("doc", "# Doc\n\nRacing.\n");
+      held = new Promise((resolve) => {
+        release = resolve;
+      });
+      const scheduling = vault.commitSoon("doc.md", editMessage(store, "doc"));
+      held = null;
+      const closing = vault.closeCommits();
+      release();
+      await Promise.all([scheduling, closing]);
+      expect(log(root)).toEqual(["Wiki: edit Doc"]);
+      expect(vault.pendingCommits()).toEqual([]);
+      await vault.writeDoc("doc", "# Doc\n\nAfter close.\n");
+      await vault.commitSoon("doc.md", editMessage(store, "doc"));
+      expect(vault.pendingCommits()).toEqual([]);
+      await vault.flushCommits();
+      expect(log(root)).toEqual(["Wiki: edit Doc", "Wiki: edit Doc"]);
+      disposed = true;
+      await vault.writeDoc("doc", "# Doc\n\nAfter dispose.\n");
+      await vault.commitSoon("doc.md", editMessage(store, "doc"));
+      await vault.flushCommits();
+      expect(vault.pendingCommits()).toEqual([]);
+      expect(warnings).toEqual([]);
     });
   });
 });

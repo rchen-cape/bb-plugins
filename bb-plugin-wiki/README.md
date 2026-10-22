@@ -164,10 +164,31 @@ await bb.sdk.plugins.callRpc({
 - **Browse.** With no query, the Wiki page lists docs grouped as Topics,
   Projects, Processes, and Services. Topics are the catch-all; a service doc
   covers one running system or codebase (how it works, config, APIs).
-- **Read and edit.** A doc shows its type, tag, aliases, and the docs that
-  link to it. **Edit** opens a Markdown editor (`⌘S` or `⌘Enter` saves). If the file
-  changed on disk meanwhile, you choose **Reload** or **Overwrite**. **Copy
-  link** copies `[[Doc title]]`.
+- **Read and edit in place.** A doc shows its type, tag, aliases, and the docs
+  that link to it. Click into the text and type: there is no separate edit
+  mode. The text looks rendered, and a Markdown mark (`**`, `#`, `[[…]]`)
+  shows only while the cursor is on it. The title shows once, in the header.
+  Type `/` on an empty line for headings, lists, to-dos, quotes, code, a
+  divider, or a table.
+- **Autosave.** Edits save about a second after you stop typing, at least
+  every 5 seconds while you keep typing, and when you leave the doc, switch
+  windows, or press `⌘S`. Next to "Updated" you see "Saving…", "Saved",
+  "Unsaved changes", or "Couldn't save". If the file changed on disk while
+  you had unsaved edits, you choose **Reload** or **Overwrite**. If it was
+  deleted on disk, **Overwrite** saves it again with your edits and **Discard**
+  drops them. Deleting a doc with edits that could not be saved deletes the
+  edits too.
+- **Highlight.** Select text and click **Highlight**, the first button of the
+  formatting toolbar, or press `⌘⇧H`. It writes `==text==`, which shows as a
+  yellow marker highlight. The toolbar also has bold, italic, strikethrough,
+  code, and link.
+- **Markdown.** The **Markdown** button in the header shows the raw file,
+  frontmatter and source markers included. Click it again for the rendered
+  view.
+- **Source labels.** Each added block shows where it came from (for example
+  "from 10-14-26 notes") in small, faint grey text above it. Hover it for the
+  date it was added.
+- **Copy link** copies `[[Doc title]]`.
 - **Rename and delete.** Right-click a doc in the list, or use **Rename** and
   **Delete** on the doc page. A rename moves the file to match the new title and
   keeps the old name as an alias, so your `@tags` and `[[links]]` still find it.
@@ -203,7 +224,7 @@ falls back to its default.
 | `routingAgent` | `true` | Ask Claude Code to suggest destinations. When off, cards are routed by links and tags only. |
 | `routingModel` | empty | Model for the routing thread. Empty uses the provider default. |
 | `ingestStartDate` | empty | Earliest daily note to ingest, a real date as `YYYY-MM-DD`. Empty starts 7 days before the first run. |
-| `gitHistory` | `true` | Run `git init` in the Wiki folder and commit each change. |
+| `gitHistory` | `true` | Run `git init` in the Wiki folder and commit each change. Editor saves to one doc share one commit, made 30 s after the last save (at most 5 min after the first). |
 | `codeBlockButton` | `true` | Show **Add to Wiki** on code blocks in assistant messages that have a common language tag. |
 
 ## CLI
@@ -252,7 +273,7 @@ aliases change.
 ├── unified-notification.md
 ├── assets/                       copied images and videos
 ├── .wiki/tags.json               doc tags for Notes autocomplete
-└── .git/                         one commit per change, when git history is on
+└── .git/                         one commit per change (editor saves grouped), when git history is on
 ```
 
 A doc is plain Markdown with optional frontmatter (`title`, `type`,
@@ -333,5 +354,7 @@ uses. [SPEC.md](SPEC.md) is the full design.
 | `lib/fuzzy.ts`, `lib/slug.ts`, `lib/wiki.ts` | Did-you-mean matching, slugs and tags, shared constants. |
 | `lib/card-media.ts` | Image lines (with caption escaping), first lines, and source labels of cards from other plugins. |
 | `app.tsx` | App entry: sidebar page, message action, code block button, commands. |
-| `components/` | Wiki page, doc view and editor, inbox and card view, dialogs, search. |
+| `lib/live-preview/` | The live-preview Markdown editor shared with Notes (CodeMirror 6): rendering, `==highlight==`, toolbar, slash menu, byte-exact load and save. |
+| `components/wiki-editor.ts`, `components/use-live-doc.ts`, `components/autosave.ts` | The Wiki's editor extensions (wiki links, embeds, source labels, hidden title), the doc's editor session, and autosave. |
+| `components/` | Wiki page, doc view, inbox and card view, dialogs, search. |
 | `skills/wiki/SKILL.md` | Agent skill. |

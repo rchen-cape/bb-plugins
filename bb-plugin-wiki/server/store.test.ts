@@ -4,7 +4,7 @@ import type { Destination } from "../contract";
 import { tagForSlug } from "../lib/slug";
 import { MARK_END, MARK_START } from "../lib/wiki";
 import type { IndexedDoc, IndexedSection } from "./index-types";
-import { createStore, ftsQuery, type NewCard, type SearchInput } from "./store";
+import { createStore, ftsQuery, stripHighlightDelimiters, type NewCard, type SearchInput } from "./store";
 
 const MARKER = '<!-- wiki:source notes="Time/oct2026/10-14-26.md" date="2026-10-14" added="2026-10-15" -->';
 
@@ -241,6 +241,30 @@ describe("search", () => {
     expect(search({ query: "kiwi" }).sections[0]?.snippet).toBe(`a fake highlight about ${MARK_START}kiwi${MARK_END}`);
     expect(search({ query: "" }).sections[0]?.snippet).toBe("a fake highlight about kiwi");
     expect(store.catalog(1)[0]?.excerpt).toBe("a fake highlight about kiwi");
+  });
+
+  it("drops ==highlight== delimiters from snippets and excerpts but keeps a lone ==", () => {
+    const { store, search } = setup();
+    store.upsertDoc(doc({ slug: "hl", title: "Highlights" }, ["", "Use ==the kiwi== token, and a==b==c too, but x == y and if (p==q) stay."]));
+    expect(search({ query: "kiwi" }).sections[0]?.snippet).toBe(`Use the ${MARK_START}kiwi${MARK_END} token, and abc too, but x == y and if (p==q) stay.`);
+    expect(search({ query: "" }).sections[0]?.snippet).toBe("Use the kiwi token, and abc too, but x == y and if (p==q) stay.");
+    expect(store.catalog(1)[0]?.excerpt).toBe("Use the kiwi token, and abc too, but x == y and if (p==q) stay.");
+    expect(stripHighlightDelimiters("==one\n\ntwo== ===three=== ==four==")).toBe("==one\n\ntwo== ===three=== four");
+  });
+
+  it("keeps == inside code spans, code blocks, link targets and URLs", () => {
+    const { store, search } = setup();
+    expect(stripHighlightDelimiters("`a==b` and `c==d`, ``e`==f`` ==g==")).toBe("`a==b` and `c==d`, ``e`==f`` g");
+    expect(stripHighlightDelimiters("```js\nif (x==1 && y==2) {}\n```\n==after==")).toBe("```js\nif (x==1 && y==2) {}\n```\nafter");
+    expect(stripHighlightDelimiters("~~~\na==b==c\n\nd==e==f\n~~~")).toBe("~~~\na==b==c\n\nd==e==f\n~~~");
+    expect(stripHighlightDelimiters("==lead==\n\n    x==1==y\n\n    z==2==w\n\n==tail==")).toBe("lead\n\n    x==1==y\n\n    z==2==w\n\ntail");
+    expect(stripHighlightDelimiters("[link](http://h/?a==b) and c==d")).toBe("[link](http://h/?a==b) and c==d");
+    expect(stripHighlightDelimiters("see https://h/?q==v==w or <mailto:a==b==c> and www.h.io/?a==b== then ==x==")).toBe(
+      "see https://h/?q==v==w or <mailto:a==b==c> and www.h.io/?a==b== then x",
+    );
+    store.upsertDoc(doc({ slug: "code", title: "Code" }, ["", "Run `a==b` then ==kiwi==.\n\n```\nif (x==1 && y==2) {}\n```"]));
+    expect(search({ query: "kiwi" }).sections[0]?.snippet).toBe(`Run \`a==b\` then ${MARK_START}kiwi${MARK_END}. \`\`\` if (x==1 && y==2) {} \`\`\``);
+    expect(store.catalog(1)[0]?.excerpt).toBe("Run `a==b` then kiwi. ``` if (x==1 && y==2) {} ```");
   });
 
   it("indexes bodies without trailing spaces on any line and with at most one blank line in a row", () => {

@@ -41,7 +41,17 @@ export interface DocContent {
   path: string;
 }
 
-export type WriteResult = { outcome: "written"; sha256: string } | { outcome: "conflict" };
+export type WriteResult = { outcome: "written"; sha256: string; changed: boolean } | { outcome: "conflict" };
+
+type PlaceOutcome = "written" | "same" | "conflict";
+
+interface PendingCommit {
+  root: string;
+  path: string;
+  message: () => string;
+  idle: NodeJS.Timeout;
+  deadline: NodeJS.Timeout;
+}
 
 export interface FirstBlock {
   heading: string;
@@ -115,6 +125,8 @@ const GIT_IDENTITY: ReadonlyArray<readonly [string, string]> = [
 const GIT_ENV_DROP = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX"];
 const DEBOUNCE_MS = 300;
 const POLL_MS = 30_000;
+export const COMMIT_IDLE_MS = 30_000;
+export const COMMIT_MAX_WAIT_MS = 5 * 60_000;
 const WRITE_ATTEMPTS = 3;
 const ASSET_ATTEMPTS = 100;
 const ASSET_HASH_CHARS = 8;
@@ -778,28 +790,135 @@ export function createVault(deps: VaultDeps) {
     }
   }
 
-  async function placeDoc(realRoot: string, file: string, bytes: Uint8Array, current: LoadedDoc | null, expected: string | null | undefined): Promise<boolean> {
-    if (conflicts(current, expected)) return false;
-    if (current?.sha256 === sha256Hex(bytes)) return true;
+  async function placeDoc(realRoot: string, file: string, bytes: Uint8Array, current: LoadedDoc | null, expected: string | null | undefined): Promise<PlaceOutcome> {
+    if (conflicts(current, expected)) return "conflict";
+    if (current?.sha256 === sha256Hex(bytes)) return "same";
     await prepareFolder(realRoot, path.dirname(file));
-    if (expected === null) return createFileExclusive(file, bytes);
+    if (expected === null) return (await createFileExclusive(file, bytes)) ? "written" : "conflict";
     await writeFileAtomic(file, bytes);
-    return true;
+    return "written";
   }
 
   async function writeAt(rootPath: string, segments: readonly string[], content: string, expected: string | null | undefined): Promise<WriteResult> {
     const realRoot = await openRoot(rootPath);
     const file = docFilePath(rootPath, segments);
     const bytes = toBytes(content);
-    if (!(await placeDoc(realRoot, file, bytes, await readDocFile(realRoot, file), expected))) return { outcome: "conflict" };
-    await indexAfterWrite(rootPath, realRoot, segments);
-    return { outcome: "written", sha256: sha256Hex(bytes) };
+    const placed = await placeDoc(realRoot, file, bytes, await readDocFile(realRoot, file), expected);
+    if (placed === "conflict") return { outcome: "conflict" };
+    const sha256 = sha256Hex(bytes);
+    const changed = placed === "written" || store.getDoc(segments.join("/"))?.sha256 !== sha256;
+    if (changed) await indexAfterWrite(rootPath, realRoot, segments);
+    return { outcome: "written", sha256, changed };
+  }
+
+  const pending = new Map<string, PendingCommit>();
+  const inflight = new Set<Promise<void>>();
+  const scheduling = new Set<Promise<void>>();
+  let closing = false;
+  let closed = false;
+
+  function warn(message: string): void {
+    if (!closed) log.warn(message);
+  }
+
+  function forgetPending(entry: PendingCommit): void {
+    clearTimeout(entry.idle);
+    clearTimeout(entry.deadline);
+    if (pending.get(entry.path) === entry) pending.delete(entry.path);
+  }
+
+  function takePending(covers: (relPath: string) => boolean): PendingCommit[] {
+    const due = [...pending.values()].filter((entry) => covers(entry.path));
+    for (const entry of due) forgetPending(entry);
+    return due;
+  }
+
+  async function commitTaken(rootPath: string, due: readonly PendingCommit[]): Promise<void> {
+    if (due.length === 0) return;
+    try {
+      if (!(await deps.gitEnabled())) return;
+    } catch (error) {
+      warn(`Wiki git commit failed: ${errorMessage(error)}`);
+      return;
+    }
+    for (const entry of due) {
+      try {
+        if (entry.root === rootPath) await commitAt(rootPath, entry.message(), [entry.path]);
+        else await enqueue(entry.root, () => runLeased(entry.root, (other) => commitAt(other, entry.message(), [entry.path])));
+      } catch (error) {
+        warn(`Wiki git commit failed in ${entry.root}: ${errorMessage(error)}`);
+      }
+    }
+  }
+
+  function commitInBackground(due: readonly PendingCommit[]): void {
+    if (due.length === 0) return;
+    const work = runExclusive((rootPath) => commitTaken(rootPath, due))
+      .catch((error: unknown) => warn(`Wiki git commit failed: ${errorMessage(error)}`))
+      .catch(() => undefined);
+    inflight.add(work);
+    void work.finally(() => inflight.delete(work));
+  }
+
+  function commitTimer(ms: number, relPath: string): NodeJS.Timeout {
+    const timer = setTimeout(() => commitInBackground(takePending((entry) => entry === relPath)), ms);
+    timer.unref();
+    return timer;
+  }
+
+  async function scheduleCommit(relPath: string, message: () => string): Promise<void> {
+    try {
+      if (!(await deps.gitEnabled())) return;
+      const rootPath = await root();
+      const spec = relativeSpec([rootPath], relPath);
+      if (spec === null || spec === ".") return;
+      const existing = pending.get(spec);
+      if (existing !== undefined && existing.root === rootPath) {
+        clearTimeout(existing.idle);
+        existing.idle = commitTimer(COMMIT_IDLE_MS, spec);
+        existing.message = message;
+      } else {
+        if (existing !== undefined) {
+          forgetPending(existing);
+          commitInBackground([existing]);
+        }
+        pending.set(spec, {
+          root: rootPath,
+          path: spec,
+          message,
+          idle: commitTimer(COMMIT_IDLE_MS, spec),
+          deadline: commitTimer(COMMIT_MAX_WAIT_MS, spec),
+        });
+      }
+      if (closing) commitInBackground(takePending((entry) => entry === spec));
+    } catch (error) {
+      warn(`Wiki could not schedule a git commit: ${errorMessage(error)}`);
+    }
+  }
+
+  async function flushCommits(): Promise<void> {
+    await Promise.all([...scheduling]);
+    commitInBackground(takePending(() => true));
+    await Promise.all([...inflight]);
+  }
+
+  function commitPendingAt(rootPath: string, relPaths: readonly string[]): Promise<void> {
+    const covered = new Set(relPaths);
+    return commitTaken(rootPath, takePending((entry) => covered.has(entry)));
+  }
+
+  async function coveringSpecs(rootPath: string, entries: readonly string[]): Promise<(relPath: string) => boolean> {
+    if (entries.length === 0) return () => true;
+    const roots = [rootPath, await openRoot(rootPath)];
+    const specs = entries.flatMap((entry) => relativeSpec(roots, entry) ?? []);
+    return (relPath) => specs.some((spec) => spec === "." || spec === relPath || relPath.startsWith(`${spec}/`));
   }
 
   async function updateDoc(slug: string, edit: (content: string) => string): Promise<{ sha256: string }> {
     const segments = requireDocSegments(slug);
     return runExclusive(async (rootPath) => {
       const realRoot = await openRoot(rootPath);
+      await commitPendingAt(rootPath, [docRelPath(slug)]);
       for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt += 1) {
         const current = await readDocFile(realRoot, docFilePath(rootPath, segments));
         if (current === null) throw new VaultError("missing", `The Wiki doc ${JSON.stringify(slug)} does not exist`);
@@ -1024,6 +1143,7 @@ export function createVault(deps: VaultDeps) {
         const realRoot = await openRoot(rootPath);
         const file = docFilePath(rootPath, segments);
         if ((await readDocFile(realRoot, file)) === null) throw new VaultError("missing", `The Wiki doc ${JSON.stringify(slug)} does not exist`);
+        await commitPendingAt(rootPath, [docRelPath(slug)]);
         await rm(file);
         store.removeDoc(slug);
         await refreshTags(rootPath, realRoot);
@@ -1041,6 +1161,7 @@ export function createVault(deps: VaultDeps) {
         if (sha256Hex(toBytes(current.content)) !== current.sha256) {
           throw new VaultError("invalid-encoding", `The Wiki doc ${JSON.stringify(slug)} is not valid UTF-8, so it is left as is`);
         }
+        await commitPendingAt(rootPath, [docRelPath(slug)]);
         const parsed = parseDoc(current.content, slug);
         const keepAliases = [tagForSlug(slug), slugify(parsed.title)];
         const content = renameDocContent(current.content, { oldTitle: parsed.title, title, keepAliases });
@@ -1111,10 +1232,32 @@ export function createVault(deps: VaultDeps) {
     async commit(message: string, paths: readonly string[] = [], removed: readonly string[] = []): Promise<void> {
       try {
         if (!(await deps.gitEnabled())) return;
-        await runExclusive((rootPath) => commitAt(rootPath, message, paths, removed));
+        await runExclusive(async (rootPath) => {
+          await commitTaken(rootPath, takePending(await coveringSpecs(rootPath, [...paths, ...removed])));
+          await commitAt(rootPath, message, paths, removed);
+        });
       } catch (error) {
         log.warn(`Wiki git commit failed: ${errorMessage(error)}`);
       }
+    },
+
+    commitSoon(relPath: string, message: () => string): Promise<void> {
+      const work = scheduleCommit(relPath, message);
+      scheduling.add(work);
+      void work.finally(() => scheduling.delete(work));
+      return work;
+    },
+
+    pendingCommits(): string[] {
+      return [...pending.keys()];
+    },
+
+    flushCommits,
+
+    async closeCommits(): Promise<void> {
+      closing = true;
+      await flushCommits();
+      closed = true;
     },
 
     async indexDoc(slug: string): Promise<boolean> {

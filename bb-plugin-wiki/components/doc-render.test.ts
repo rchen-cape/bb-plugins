@@ -1,18 +1,25 @@
 import { describe, expect, it } from "vitest";
 import type { DocSummary } from "../contract";
-import { insertUnderHeading, newDocContent } from "../lib/markdown-doc";
+import { MARKER_LINE, newDocContent } from "../lib/markdown-doc";
 import {
   createResolver,
-  mapOutsideInlineCode,
+  describeWikiEmbed,
+  describeWikiLink,
+  htmlMediaLine,
+  htmlMediaUrl,
+  leadingTitleSpan,
+  markdownImageUrl,
+  mediaUrl,
   noteDateLabel,
+  parseMarkerAttributes,
   parseThreadHref,
   parseWikiHref,
   parseWikiLink,
-  renderDoc,
-  renderedHeadingIndex,
   resolveAssetPath,
-  stripFrontmatter,
+  sourceMarkerLabel,
+  threadHref,
   wikiHref,
+  type WikiLinkContext,
 } from "./doc-render";
 
 function doc(slug: string, title: string, extra: Partial<DocSummary> = {}): DocSummary {
@@ -26,8 +33,21 @@ const DOCS = [
 ];
 
 const resolve = createResolver(DOCS);
-const render = (content: string, docSlug?: string) => renderDoc(content, { pluginId: "wiki", resolve, ...(docSlug === undefined ? {} : { docSlug }) });
 const asset = (path: string) => `/api/v1/plugins/wiki/http/asset?path=${encodeURIComponent(path)}`;
+
+function context(docSlug: string, ownHeadings: readonly string[] = []): WikiLinkContext {
+  return { resolve, docSlug, ownHeadings: () => ownHeadings };
+}
+
+function lines(text: string): (index: number) => string | null {
+  const all = text.split("\n");
+  return (index) => all[index] ?? null;
+}
+
+function markerLabel(line: string) {
+  const match = MARKER_LINE.exec(line);
+  return match === null ? null : sourceMarkerLabel(parseMarkerAttributes(match[1] ?? ""));
+}
 
 describe("createResolver", () => {
   it("resolves by slug, then title, then alias, then tag, ignoring case", () => {
@@ -65,102 +85,69 @@ describe("wiki hrefs", () => {
     expect(parseWikiHref("#wiki/plain")).toEqual({ slug: "plain", anchor: null });
     expect(parseWikiHref("#wiki/")).toBeNull();
     expect(parseWikiHref("https://example.invalid")).toBeNull();
-    expect(parseThreadHref("#wiki-thread/thr_abc")).toBe("thr_abc");
+    expect(parseThreadHref(threadHref("thr_abc"))).toBe("thr_abc");
     expect(parseThreadHref("#wiki/x")).toBeNull();
   });
 });
 
-describe("stripFrontmatter", () => {
-  it("removes a leading YAML block and the blank lines after it", () => {
-    expect(stripFrontmatter("---\ntitle: X\naliases: [a]\n---\n\n# X\n")).toBe("# X\n");
-    expect(stripFrontmatter("﻿---\ntitle: X\n...\nBody")).toBe("Body");
-    expect(stripFrontmatter("# No frontmatter\n---\n")).toBe("# No frontmatter\n---\n");
+describe("describeWikiLink", () => {
+  it("links resolved docs and labels them like the old reader", () => {
+    expect(describeWikiLink("Unified notification", context("x"))).toEqual({ label: "Unified notification", href: "#wiki/unified-notification", missing: null });
+    expect(describeWikiLink("cc", context("x")).href).toBe("#wiki/adding-config-catalog");
+    expect(describeWikiLink("cc#Global token", context("x"))).toEqual({
+      label: "cc › Global token",
+      href: "#wiki/adding-config-catalog#global-token",
+      missing: null,
+    });
+    expect(describeWikiLink("cc#Global token|the token step", context("x")).label).toBe("the token step");
+    expect(describeWikiLink("#Setup", context("team/onboarding")).href).toBe("#wiki/team/onboarding#setup");
+  });
+
+  it("explains a link to a doc that does not exist yet", () => {
+    expect(describeWikiLink("Billing <v2>", context("x"))).toEqual({ label: "Billing <v2>", href: null, missing: "No Wiki doc named “Billing <v2>” yet" });
+  });
+
+  it("uses the anchors search gives, with the open doc's own headings for self links", () => {
+    const docs = [doc("runbook", "Runbook", { headings: ["Runbook", "Setup!", "Setup"] }), doc("other", "Other", { headings: ["Intro", "Limits!", "Limits"] })];
+    const own: WikiLinkContext = { resolve: createResolver(docs), docSlug: "runbook", ownHeadings: () => ["Runbook", "Setup!", "Setup", "Setup"] };
+    expect(describeWikiLink("Other#limits", own).href).toBe("#wiki/other#limits-1");
+    expect(describeWikiLink("Other#Limits!", own).href).toBe("#wiki/other#limits");
+    expect(describeWikiLink("Other#Missing part", own).href).toBe("#wiki/other#missing-part");
+    expect(describeWikiLink("#Setup", own).href).toBe("#wiki/runbook#setup-1");
+    expect(describeWikiLink("Runbook#setup!", own).href).toBe("#wiki/runbook#setup");
   });
 });
 
-describe("renderDoc links", () => {
-  it("turns resolved links into internal links", () => {
-    expect(render("See [[Unified notification]] and [[cc]].")).toBe(
-      "See [Unified notification](#wiki/unified-notification) and [cc](#wiki/adding-config-catalog).",
-    );
+describe("media", () => {
+  it("resolves embeds into the assets folder unless they name a folder", () => {
+    expect(describeWikiEmbed("diagram.png", "x")).toEqual({ relPath: "assets/diagram.png", alt: "diagram.png" });
+    expect(describeWikiEmbed("clip.mp4|The demo", "team/doc")).toEqual({ relPath: "assets/clip.mp4", alt: "The demo" });
+    expect(describeWikiEmbed("../img/a.png", "team/sub/doc")).toEqual({ relPath: "team/img/a.png", alt: "../img/a.png" });
   });
 
-  it("supports headings and labels", () => {
-    expect(render("[[cc#Global token]]")).toBe("[cc › Global token](#wiki/adding-config-catalog#global-token)");
-    expect(render("[[cc#Global token|the token step]]")).toBe("[the token step](#wiki/adding-config-catalog#global-token)");
-    expect(render("[[#Setup]]", "team/onboarding")).toBe("[Setup](#wiki/team/onboarding#setup)");
+  it("serves media through the plugin asset URL, escaping parentheses", () => {
+    expect(mediaUrl("wiki", "assets/a (1).png")).toBe(asset("assets/a (1).png").replace("(", "%28").replace(")", "%29"));
   });
 
-  it("escapes labels and ignores bracketed text that is not a link", () => {
-    expect(render("[[cc|a [draft] note]]")).toBe("[[cc|a [draft] note]]");
-    expect(render("[[cc|a \\ b]]")).toBe("[a \\\\ b](#wiki/adding-config-catalog)");
+  it("loads relative markdown images and video from the Wiki, and leaves other files as links", () => {
+    expect(markdownImageUrl("wiki", "assets/flow%20chart.png", "x")).toBe(asset("assets/flow chart.png"));
+    expect(markdownImageUrl("wiki", "<b c.png>", "x")).toBe(asset("b c.png"));
+    expect(markdownImageUrl("wiki", "../img/a.png", "team/onboarding")).toBe(asset("img/a.png"));
+    expect(markdownImageUrl("wiki", "assets/demo.mov", "x")).toBe(asset("assets/demo.mov"));
+    expect(markdownImageUrl("wiki", "notes.md", "x")).toBeNull();
+    expect(markdownImageUrl("wiki", "https://cdn.invalid/a.png", "x")).toBe("https://cdn.invalid/a.png");
+    expect(markdownImageUrl("wiki", "/api/v1/x.png", "x")).toBe("/api/v1/x.png");
+    expect(markdownImageUrl("wiki", "javascript:alert(1)", "x")).toBeNull();
   });
 
-  it("renders unresolved links as a dotted span", () => {
-    expect(render("Ask about [[Billing <v2>]]")).toBe('Ask about <span title="No Wiki doc named “Billing &lt;v2&gt;” yet">Billing &lt;v2&gt;</span>');
-  });
-
-  it("leaves fenced code and inline code untouched", () => {
-    const content = ["```md", "[[cc]] and ![[x.png]]", "<!-- wiki:source manual added=\"2026-10-15\" -->", "```", "Use `[[cc]]` for [[cc]]."].join("\n");
-    expect(render(content).split("\n")).toEqual([
-      "```md",
-      "[[cc]] and ![[x.png]]",
-      '<!-- wiki:source manual added="2026-10-15" -->',
-      "```",
-      "Use `[[cc]]` for [cc](#wiki/adding-config-catalog).",
-    ]);
-  });
-
-  it("keeps longer fences open past shorter ones and handles tildes", () => {
-    const content = ["````", "```", "[[cc]]", "```", "````", "~~~", "[[cc]]", "~~~", "[[cc]]"].join("\n");
-    const lines = render(content).split("\n");
-    expect(lines.slice(0, 8)).toEqual(["````", "```", "[[cc]]", "```", "````", "~~~", "[[cc]]", "~~~"]);
-    expect(lines[8]).toBe("[cc](#wiki/adding-config-catalog)");
-  });
-
-  it("does not open a fence whose info string holds a line separator", () => {
-    expect(render("```\u2028[[cc]]\n[[cc]]")).toBe("```\u2028[cc](#wiki/adding-config-catalog)\n[cc](#wiki/adding-config-catalog)");
-  });
-});
-
-describe("mapOutsideInlineCode", () => {
-  it("only transforms text outside matching backtick runs", () => {
-    const upper = (text: string) => text.toUpperCase();
-    expect(mapOutsideInlineCode("a `b` c ``d ` e`` f", upper)).toBe("A `b` C ``d ` e`` F");
-    expect(mapOutsideInlineCode("unmatched ` tick", upper)).toBe("UNMATCHED ` TICK");
-  });
-});
-
-describe("renderDoc media", () => {
-  it("embeds assets with the plugin asset URL", () => {
-    expect(render("![[diagram.png]]")).toBe(`![diagram.png](${asset("assets/diagram.png")})`);
-    expect(render("![Flow](assets/flow%20chart.png)")).toBe(`![Flow](${asset("assets/flow chart.png")})`);
-    expect(render("![[clip.mp4]]")).toBe(`<video controls src="${asset("assets/clip.mp4")}"></video>`);
-    expect(render("![Demo](assets/demo.mov)")).toBe(`<video controls src="${asset("assets/demo.mov")}"></video>`);
-    expect(render("![[notes.md]]")).toBe(`[notes.md](${asset("assets/notes.md")})`);
-  });
-
-  it("rewrites relative src attributes in raw HTML and resolves doc-relative paths", () => {
-    expect(render('<video controls src="assets/a.mp4"></video>')).toBe(`<video controls src="${asset("assets/a.mp4")}"></video>`);
-    expect(render("![x](../img/a.png)", "team/onboarding")).toBe(`![x](${asset("img/a.png")})`);
-    expect(render("![[a (1).png]]")).toBe(`![a (1).png](${asset("assets/a (1).png").replace("(", "%28").replace(")", "%29")})`);
-  });
-
-  it("leaves absolute and remote images alone", () => {
-    expect(render("![x](https://cdn.invalid/a.png)")).toBe("![x](https://cdn.invalid/a.png)");
-    expect(render('<img src="/api/v1/x.png">')).toBe('<img src="/api/v1/x.png">');
-  });
-
-  it("reads angle targets, padding and titles, and leaves a broken title alone", () => {
-    expect(render('![a](<b c.png> "T")')).toBe(`![a](${asset("b c.png")})`);
-    expect(render("![a]( b.png )")).toBe(`![a](${asset("b.png")})`);
-    expect(render('![a](b.png "T" x)')).toBe('![a](b.png "T" x)');
-  });
-
-  it("rewrites the first quoted src inside a media tag", () => {
-    expect(render('<img alt="x" src="" src="pic.png">')).toBe(`<img alt="x" src="" src="${asset("pic.png")}">`);
-    expect(render('<IMG SRC="a.png"')).toBe(`<IMG SRC="${asset("a.png")}"`);
-    expect(render('<img > src="a.png"')).toBe('<img > src="a.png"');
+  it("reads one media tag per line and resolves its first non-empty src", () => {
+    expect(htmlMediaLine('<video controls src="assets/a.mp4"></video>')).toEqual({ video: true, src: "assets/a.mp4", alt: "" });
+    expect(htmlMediaLine('  <img alt="x" src="" src="pic.png">')).toEqual({ video: false, src: "pic.png", alt: "x" });
+    expect(htmlMediaLine('<IMG SRC="a&amp;b.png">')).toEqual({ video: false, src: "a&b.png", alt: "" });
+    expect(htmlMediaLine('<img > src="a.png"')).toBeNull();
+    expect(htmlMediaLine('Text <img src="a.png">')).toBeNull();
+    expect(htmlMediaUrl("wiki", "assets/a.mp4", "x")).toBe(asset("assets/a.mp4"));
+    expect(htmlMediaUrl("wiki", "/api/v1/x.png", "x")).toBe("/api/v1/x.png");
   });
 
   it("resolves asset paths against the doc folder", () => {
@@ -171,36 +158,25 @@ describe("renderDoc media", () => {
   });
 });
 
-describe("renderDoc source markers", () => {
-  it("shows notes, thread, agent, upload and manual sources", () => {
-    const content = [
-      '<!-- wiki:source notes="Time/oct2026/10-14-26.md" date="2026-10-14" added="2026-10-15" -->',
-      "- first",
-      "",
-      '<!-- wiki:source thread="thr_abc" title="Debug &quot;push&quot;" added="2026-10-15" -->',
-      "",
-      "Body",
-      '<!-- wiki:source agent thread="thr_x" title="Agent run" added="2026-10-15" -->',
-      '<!-- wiki:source upload="demo.mp4" added="2026-10-15" -->',
-      "<!-- wiki:source manual -->",
-      '<!-- wiki:source notes="Time/9-02-26.md" -->',
-    ].join("\n");
-    expect(render(content).split("\n")).toEqual([
-      '<sub title="Added 2026-10-15">from 10-14-26 notes</sub>',
-      "",
-      "- first",
-      "",
-      '<sub title="Added 2026-10-15">from <a href="#wiki-thread/thr_abc">“Debug &quot;push&quot;”</a></sub>',
-      "",
-      "Body",
-      '<sub title="Added 2026-10-15">from an agent in <a href="#wiki-thread/thr_x">“Agent run”</a></sub>',
-      "",
-      '<sub title="Added 2026-10-15">from demo.mp4</sub>',
-      "",
-      "<sub>added by hand</sub>",
-      "",
-      "<sub>from 09-02-26 notes</sub>",
+describe("source marker labels", () => {
+  it("names notes, thread, agent, upload and manual sources", () => {
+    expect(markerLabel('<!-- wiki:source notes="Time/oct2026/10-14-26.md" date="2026-10-14" added="2026-10-15" -->')).toEqual({
+      parts: [{ text: "from 10-14-26 notes" }],
+      title: "Added 2026-10-15",
+    });
+    expect(markerLabel('<!-- wiki:source thread="thr_abc" title="Debug &quot;push&quot;" added="2026-10-15" -->')).toEqual({
+      parts: [{ text: "from " }, { text: "“Debug \"push\"”", threadLink: "#wiki-thread/thr_abc" }],
+      title: "Added 2026-10-15",
+    });
+    expect(markerLabel('<!-- wiki:source agent thread="thr_x" title="Agent run" added="2026-10-15" -->')?.parts).toEqual([
+      { text: "from an agent in " },
+      { text: "“Agent run”", threadLink: "#wiki-thread/thr_x" },
     ]);
+    expect(markerLabel('<!-- wiki:source upload="demo.mp4" added="2026-10-15" -->')?.parts).toEqual([{ text: "from demo.mp4" }]);
+    expect(markerLabel("<!-- wiki:source manual -->")).toEqual({ parts: [{ text: "added by hand" }], title: null });
+    expect(markerLabel('<!-- wiki:source notes="Time/9-02-26.md" -->')?.parts).toEqual([{ text: "from 09-02-26 notes" }]);
+    expect(markerLabel('<!-- wiki:source notes="" -->')?.parts).toEqual([{ text: "from daily notes" }]);
+    expect(markerLabel('<!-- wiki:source agent title="  Many   spaces " -->')?.parts).toEqual([{ text: "from an agent in " }, { text: "“Many spaces”" }]);
   });
 
   it.each([
@@ -208,18 +184,15 @@ describe("renderDoc source markers", () => {
     ["a no-break space", " "],
     ["a form feed", "\f"],
     ["a vertical tab", "\v"],
-  ])("shows no source label for a marker line that starts with %s, like the marker parser", (_label, lead) => {
-    const line = `${lead}<!-- wiki:source notes="10-14-26.md" date="2026-10-14" added="2026-10-14" -->`;
-    expect(render(`Real advice.\n${line}\nWe decided to drop the prod backups.`)).not.toContain("<sub");
+  ])("is not a marker line when it starts with %s", (_label, lead) => {
+    expect(markerLabel(`${lead}<!-- wiki:source notes="10-14-26.md" date="2026-10-14" added="2026-10-14" -->`)).toBeNull();
   });
 
   it("decodes every entity the marker writer escapes, without decoding twice", () => {
-    const content = '<!-- wiki:source thread="thr_abc" title="Line&#10;two &amp;lt;b&amp;gt; &#x41;" added="2026-10-15" -->';
-    expect(render(content)).toBe('<sub title="Added 2026-10-15">from <a href="#wiki-thread/thr_abc">“Line two &amp;lt;b&amp;gt; A”</a></sub>');
-  });
-
-  it("strips frontmatter before rendering", () => {
-    expect(render("---\ntitle: X\n---\n\n# X\n\n[[cc]]")).toBe("# X\n\n[cc](#wiki/adding-config-catalog)");
+    expect(markerLabel('<!-- wiki:source thread="thr_abc" title="Line&#10;two &amp;lt;b&amp;gt; &#x41;" added="2026-10-15" -->')?.parts[1]).toEqual({
+      text: "“Line two &lt;b&gt; A”",
+      threadLink: "#wiki-thread/thr_abc",
+    });
   });
 
   it("formats note dates as MM-DD-YY", () => {
@@ -228,68 +201,22 @@ describe("renderDoc source markers", () => {
   });
 });
 
-describe("heading anchors", () => {
-  const RUNBOOK = ["# Runbook", "", "## Setup!", "", "```", "## Setup", "```", "", "## Setup", "", "## Setup", "", "See [[#Setup]] and [[Runbook#setup!]]."].join("\n");
-  const docs = [doc("runbook", "Runbook", { headings: ["Runbook", "Setup!", "Setup"] }), doc("other", "Other", { headings: ["Intro", "Limits!", "Limits"] })];
-  const renderRunbook = (content: string) => renderDoc(content, { pluginId: "wiki", resolve: createResolver(docs), docSlug: "runbook" });
-
-  it("links [[Doc#Heading]] to the anchor search uses for that heading", () => {
-    expect(renderRunbook("[[Other#limits]]")).toBe("[Other › limits](#wiki/other#limits-1)");
-    expect(renderRunbook("[[Other#Limits!]]")).toBe("[Other › Limits!](#wiki/other#limits)");
-    expect(renderRunbook("[[Other#Missing part]]")).toBe("[Other › Missing part](#wiki/other#missing-part)");
+describe("leadingTitleSpan", () => {
+  it("finds the H1 that repeats the doc title and the blank lines around it", () => {
+    const fresh = newDocContent({ title: "Token rotation", type: "topic", aliases: [] });
+    const body = fresh.slice(fresh.indexOf("---\n", 4) + 4);
+    expect(leadingTitleSpan(lines(body), "Token rotation")).toEqual({ start: 1, end: 3 });
+    expect(leadingTitleSpan(lines("#   token  ROTATION  \n\nBody"), "Token rotation")).toEqual({ start: 0, end: 2 });
   });
 
-  it("links headings of the same doc from its own content, ignoring code fences", () => {
-    expect(renderRunbook(RUNBOOK).split("\n").at(-1)).toBe("See [Setup](#wiki/runbook#setup-1) and [Runbook › setup!](#wiki/runbook#setup).");
+  it("keeps a first H1 that differs from the title, and never takes a later one", () => {
+    expect(leadingTitleSpan(lines("# Meeting notes\n\nBody"), "Q4 planning")).toBeNull();
+    expect(leadingTitleSpan(lines("Intro\n\n# Q4 planning"), "Q4 planning")).toBeNull();
   });
 
-  it("finds the rendered heading for an anchor, including later copies of a repeated heading", () => {
-    const rendered = ["Runbook", "Setup!", "Setup", "Setup"];
-    expect(renderedHeadingIndex(RUNBOOK, "setup", rendered)).toBe(1);
-    expect(renderedHeadingIndex(RUNBOOK, "setup-1", rendered)).toBe(2);
-    expect(renderedHeadingIndex(RUNBOOK, "setup-2", rendered)).toBe(3);
-    expect(renderedHeadingIndex(RUNBOOK, "runbook", rendered)).toBe(0);
-  });
-
-  it("matches by text and copy number when the page shows extra headings", () => {
-    const rendered = ["Runbook", "Setup!", "Extra", "Setup", "Setup"];
-    expect(renderedHeadingIndex(RUNBOOK, "setup-2", rendered)).toBe(4);
-    expect(renderedHeadingIndex(RUNBOOK, "setup-2", ["Runbook", "Setup!", "Setup"])).toBe(-1);
-    expect(renderedHeadingIndex(RUNBOOK, "setup-1", [])).toBe(-1);
-  });
-
-  it("falls back to the heading text for anchors the doc does not list", () => {
-    expect(renderedHeadingIndex(RUNBOOK, "Setup", ["Runbook", "Setup!", "Setup"])).toBe(1);
-    expect(renderedHeadingIndex(RUNBOOK, "nothing", ["Runbook"])).toBe(-1);
-  });
-});
-
-describe("renderDoc title", () => {
-  const withTitle = (content: string, title: string) => renderDoc(content, { pluginId: "wiki", resolve, title });
-
-  it("drops the leading H1 that repeats the doc title, so a fresh doc renders empty", () => {
-    expect(withTitle(newDocContent({ title: "Token rotation", type: "topic", aliases: [] }), "Token rotation")).toBe("");
-    expect(withTitle("---\ntitle: X\n---\n\n#   token  ROTATION  \n\nBody", "Token rotation")).toBe("Body");
-  });
-
-  it("keeps a first H1 that differs from the title, and never drops a later one", () => {
-    expect(withTitle("# Meeting notes\n\nBody", "Q4 planning")).toBe("# Meeting notes\n\nBody");
-    expect(withTitle("Intro\n\n# Q4 planning", "Q4 planning")).toBe("Intro\n\n# Q4 planning");
-  });
-
-  it("drops a title heading with closing hashes but not an indented code line", () => {
-    expect(withTitle("# Token rotation ##  \n\nBody", "Token rotation")).toBe("Body");
-    expect(withTitle("    # Token rotation\n\nBody", "Token rotation")).toBe("    # Token rotation\n\nBody");
-  });
-
-  it("renders the sections under the title", () => {
-    const content = insertUnderHeading(newDocContent({ title: "Token rotation", type: "topic", aliases: [] }), "Notes", "- a fact");
-    expect(withTitle(content, "Token rotation")).toBe("## Notes\n\n- a fact\n");
-  });
-
-  it("finds anchors in the rendered headings once the title is dropped", () => {
-    const content = "# Setup\n\n## Setup\n\nOne.\n\n## Setup\n";
-    expect(renderedHeadingIndex(content, "setup-1", ["Setup", "Setup"], "Setup")).toBe(0);
-    expect(renderedHeadingIndex(content, "setup-2", ["Setup", "Setup"], "Setup")).toBe(1);
+  it("accepts closing hashes but not an indented code line", () => {
+    expect(leadingTitleSpan(lines("# Token rotation ##  \n\nBody"), "Token rotation")).toEqual({ start: 0, end: 2 });
+    expect(leadingTitleSpan(lines("    # Token rotation\n\nBody"), "Token rotation")).toBeNull();
+    expect(leadingTitleSpan(lines(""), "Token rotation")).toBeNull();
   });
 });

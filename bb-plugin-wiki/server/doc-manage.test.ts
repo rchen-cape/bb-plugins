@@ -1,9 +1,11 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, readdir, realpath, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Card, DocSummary, IngestResult, SearchResult } from "../contract";
 import plugin from "../server";
 
@@ -162,5 +164,68 @@ describe("restore", () => {
     await expect(rpc("restoreCard", { id: card?.id })).rejects.toThrow("already accepted");
     const restored = await harness.behavior.runCli(["restore", card?.id ?? ""], { threadId: "thr_agent" });
     expect(restored.exitCode).not.toBe(0);
+  });
+});
+
+describe("editor saves", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function editing(gitHistory: boolean) {
+    const context = await setup(gitHistory);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const read = () => readFile(path.join(context.wiki, "global-token.md"), "utf8");
+    const save = async (append: string) => {
+      const content = await read();
+      const sha256 = createHash("sha256").update(content).digest("hex");
+      return context.rpc("saveDoc", { slug: "global-token", content: `${content}${append}`, expectedSha256: sha256 });
+    };
+    const subjects = () => {
+      if (!existsSync(path.join(context.wiki, ".git"))) return [];
+      try {
+        execFileSync("git", ["-C", context.wiki, "rev-parse", "--verify", "-q", "HEAD"], { stdio: "ignore" });
+      } catch {
+        return [];
+      }
+      return context.git("log", "--format=%s").trim().split("\n");
+    };
+    return { ...context, read, save, subjects };
+  }
+
+  it.runIf(hasGit())("make one commit after the editor goes quiet", async () => {
+    const { save, subjects } = await editing(true);
+    for (const word of ["one", "two", "three"]) {
+      expect(await save(`${word}\n`)).toMatchObject({ outcome: "written" });
+      await vi.advanceTimersByTimeAsync(10_000);
+    }
+    expect(subjects()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await vi.waitFor(() => expect(subjects()).toEqual(["Wiki: edit Global token"]));
+  });
+
+  it.runIf(hasGit())("commit pending edits before a rename and before a delete", async () => {
+    const { rpc, save, subjects } = await editing(true);
+    await save("typed\n");
+    expect(subjects()).toEqual([]);
+    await rpc("renameDoc", { slug: "global-token", title: "Rate limiting" });
+    expect(subjects()).toEqual(["Wiki: rename Global token → Rate limiting", "Wiki: edit Global token"]);
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await rpc("deleteDoc", { slug: "rate-limiting" });
+    expect(subjects()).toEqual(["Wiki: delete Rate limiting", "Wiki: rename Global token → Rate limiting", "Wiki: edit Global token"]);
+  });
+
+  it.runIf(hasGit())("commit pending edits when the plugin shuts down", async () => {
+    const { harness, save, subjects } = await editing(true);
+    await save("typed\n");
+    await harness.lifecycle.dispose();
+    expect(subjects()).toEqual(["Wiki: edit Global token"]);
+  });
+
+  it("never commit when git history is off", async () => {
+    const { wiki, save } = await editing(false);
+    await save("typed\n");
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(existsSync(path.join(wiki, ".git"))).toBe(false);
   });
 });

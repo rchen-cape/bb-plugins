@@ -56,6 +56,24 @@ job's tool (`wiki_record_routes` or `wiki_record_description`); `wiki_add`
 and every `bb wiki` command that changes the Wiki or its inbox are refused
 there.
 
+## How the user edits docs
+
+The user edits a doc in place on its Wiki page. There is no edit mode: the
+text looks rendered (Markdown marks show only under the cursor) and saves
+itself about a second after typing stops, or at once with `⌘S`. The title
+shows once, in the header; the frontmatter and the leading `# Title` line are
+hidden. The header's **Markdown** button shows the raw file.
+
+`==text==` is a highlight. The user adds one with the selection toolbar's
+first button (**Highlight**) or `⌘⇧H`. When you quote a doc, keep `==…==`
+as written; in text you propose with `wiki_add`, use it only for what the
+user would mark.
+
+Source markers (`<!-- wiki:source … -->`) show as small, faint labels such as
+"from 10-14-26 notes" above the block they describe. If the user asks why a
+doc changed, an edit in the Wiki page is saved as their own "Wiki: edit
+<title>" git commit, grouped per doc.
+
 ## Inbox and ingest
 
 ```

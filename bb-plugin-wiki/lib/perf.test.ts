@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { fileTitle, titleGuess } from "../components/AddToWikiDialog";
-import { renderDoc } from "../components/doc-render";
+import { ensureSyntaxTree } from "@codemirror/language";
+import { EditorState } from "@codemirror/state";
+import { htmlMediaLine, leadingTitleSpan } from "../components/doc-render";
+import { WikiLinkSyntax, buildWikiInline, wikiContext } from "../components/wiki-editor";
+import { markdownLanguageWith } from "./live-preview/index.js";
 import { withoutTitleLine } from "../server/rpc";
 import { parseNoteUnits, parseSectionUnits } from "./daily-notes";
 import { bestTitleMatches, matchTag } from "./fuzzy";
@@ -38,7 +42,13 @@ function backtickLadder(): string {
 }
 
 const NO_TAGS = { knownTags: new Set<string>() };
-const RENDER = { pluginId: "wiki", resolve: () => null };
+const WIKI_CONTEXT = { pluginId: "wiki", slug: "a", title: "a", resolve: () => null };
+
+function editorState(doc: string) {
+  const state = EditorState.create({ doc, extensions: [markdownLanguageWith([WikiLinkSyntax]), wikiContext.of(WIKI_CONTEXT)] });
+  ensureSyntaxTree(state, state.doc.length, 10_000);
+  return buildWikiInline(state, [{ from: 0, to: state.doc.length }]);
+}
 
 const cases: Array<[string, () => unknown]> = [
   ["heading with a long run of trailing spaces", () => splitSections(`# a${spaces}x`)],
@@ -86,13 +96,11 @@ const cases: Array<[string, () => unknown]> = [
   ["daily notes with one long backtick run", () => parseSectionUnits([`a ${"`".repeat(SIZE)}`], NO_TAGS)],
   ["daily notes inline code runs of every length", () => parseSectionUnits([`a ${backtickLadder().split("a").reverse().join("a")}`], NO_TAGS)],
   ["daily notes NOTES heading with trailing spaces", () => parseNoteUnits(`# NOTES${spaces}x`, NO_TAGS)],
-  ["renderDoc with many unclosed images", () => renderDoc(repeatTo("!["), RENDER)],
-  ["renderDoc with many unclosed image targets", () => renderDoc(repeatTo("![](a"), RENDER)],
-  ["renderDoc with many images sharing one angle target", () => renderDoc(repeatTo("![](<"), RENDER)],
-  ["renderDoc fence run before a line separator", () => renderDoc(`${"`".repeat(SIZE)}\u2028x`, RENDER)],
-  ["renderDoc with many media tags missing src", () => renderDoc(repeatTo("<img "), RENDER)],
-  ["renderDoc with many unclosed src values", () => renderDoc(repeatTo('<img src="'), RENDER)],
-  ["renderDoc title heading with trailing spaces", () => renderDoc(`# a${spaces}x`, { ...RENDER, title: "a" })],
+  ["wiki editor with many unclosed wiki links", () => editorState(repeatTo("[[").slice(0, SIZE / 4))],
+  ["wiki editor with many unclosed embeds", () => editorState(repeatTo("![[a").slice(0, SIZE / 4))],
+  ["media line with many tags missing src", () => htmlMediaLine(repeatTo("<img "))],
+  ["media line with many unclosed src values", () => htmlMediaLine(repeatTo('<img src="'))],
+  ["title heading with trailing spaces", () => leadingTitleSpan((index) => (index === 0 ? `# a${spaces}x` : null), "a")],
   ["titleGuess from a heading with trailing spaces", () => titleGuess(`# a${spaces}x`)],
   ["titleGuess from a heading of space-hash pairs", () => titleGuess(`### a${repeatTo(" #")}x`)],
   ["withoutTitleLine with a long first line", () => withoutTitleLine(`# a${spaces}x\nb`, "a")],

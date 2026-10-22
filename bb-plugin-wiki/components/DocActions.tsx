@@ -1,4 +1,4 @@
-import { createContext, useContext, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { createContext, useContext, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useBbNavigate } from "@get-bb/plugin-sdk/app";
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { toast } from "sonner";
@@ -14,9 +14,17 @@ import { docSubPath } from "./nav";
 
 type DocRef = Pick<DocSummary, "slug" | "title">;
 
+export interface OpenDoc {
+  flush(): Promise<boolean>;
+  discard(): void;
+}
+
+type FlushDoc = () => Promise<boolean>;
+
 interface DocActions {
   rename(doc: DocRef): void;
   remove(doc: DocRef): void;
+  registerDoc(slug: string, doc: OpenDoc): () => void;
 }
 
 type Pending = { kind: "rename"; doc: DocRef } | { kind: "delete"; doc: DocRef } | null;
@@ -27,7 +35,13 @@ export function useDocActions(): DocActions | null {
   return useContext(DocActionsContext);
 }
 
-function RenameDialog({ doc, onClose, onRenamed }: { doc: DocRef; onClose: () => void; onRenamed: (slug: string) => void }) {
+async function saveFirst(doc: DocRef, flush: FlushDoc): Promise<boolean> {
+  if (await flush()) return true;
+  toast.error(`Couldn't save ${doc.title}, so it wasn't renamed. Resolve the save problem first.`);
+  return false;
+}
+
+function RenameDialog({ doc, flush, onClose, onRenamed }: { doc: DocRef; flush: FlushDoc; onClose: () => void; onRenamed: (slug: string) => void }) {
   const rpc = useWikiRpc();
   const [title, setTitle] = useState(doc.title);
   const [saving, setSaving] = useState(false);
@@ -39,6 +53,10 @@ function RenameDialog({ doc, onClose, onRenamed }: { doc: DocRef; onClose: () =>
     if (!canSave) return;
     setSaving(true);
     try {
+      if (!(await saveFirst(doc, flush))) {
+        setSaving(false);
+        return;
+      }
       const renamed = await rpc.call("renameDoc", { slug: doc.slug, title: clean });
       toast.success(`Renamed to ${renamed.title}`);
       onRenamed(renamed.slug);
@@ -80,15 +98,17 @@ function RenameDialog({ doc, onClose, onRenamed }: { doc: DocRef; onClose: () =>
   );
 }
 
-function DeleteDialog({ doc, onClose, onDeleted }: { doc: DocRef; onClose: () => void; onDeleted: () => void }) {
+function DeleteDialog({ doc, flush, discard, onClose, onDeleted }: { doc: DocRef; flush: FlushDoc; discard: () => void; onClose: () => void; onDeleted: () => void }) {
   const rpc = useWikiRpc();
   const [deleting, setDeleting] = useState(false);
 
   const confirm = async () => {
     setDeleting(true);
     try {
+      const saved = await flush();
       const deleted = await rpc.call("deleteDoc", { slug: doc.slug });
-      toast.success(`Deleted ${deleted.title}`);
+      if (!saved) discard();
+      toast.success(saved ? `Deleted ${deleted.title}` : `Deleted ${deleted.title} and its unsaved edits`);
       onDeleted();
       onClose();
     } catch (cause) {
@@ -122,10 +142,19 @@ function DeleteDialog({ doc, onClose, onDeleted }: { doc: DocRef; onClose: () =>
 export function DocActionsProvider({ currentSlug, children }: { currentSlug: string | null; children: ReactNode }) {
   const navigate = useBbNavigate();
   const [pending, setPending] = useState<Pending>(null);
+  const open = useRef(new Map<string, OpenDoc>());
+  const flushFor = (slug: string): FlushDoc => () => open.current.get(slug)?.flush() ?? Promise.resolve(true);
+  const discardFor = (slug: string) => () => open.current.get(slug)?.discard();
   const actions = useMemo<DocActions>(
     () => ({
       rename: (doc) => setPending({ kind: "rename", doc }),
       remove: (doc) => setPending({ kind: "delete", doc }),
+      registerDoc: (slug, doc) => {
+        open.current.set(slug, doc);
+        return () => {
+          if (open.current.get(slug) === doc) open.current.delete(slug);
+        };
+      },
     }),
     [],
   );
@@ -137,6 +166,7 @@ export function DocActionsProvider({ currentSlug, children }: { currentSlug: str
       {pending?.kind === "rename" ? (
         <RenameDialog
           doc={pending.doc}
+          flush={flushFor(pending.doc.slug)}
           onClose={close}
           onRenamed={(slug) => {
             if (currentSlug === pending.doc.slug && slug !== pending.doc.slug) {
@@ -148,6 +178,8 @@ export function DocActionsProvider({ currentSlug, children }: { currentSlug: str
       {pending?.kind === "delete" ? (
         <DeleteDialog
           doc={pending.doc}
+          flush={flushFor(pending.doc.slug)}
+          discard={discardFor(pending.doc.slug)}
           onClose={close}
           onDeleted={() => {
             if (currentSlug === pending.doc.slug) navigate.toPluginPanel(WIKI_PANEL, { subPath: "", replace: true });

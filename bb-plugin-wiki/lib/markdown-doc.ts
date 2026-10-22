@@ -1,6 +1,6 @@
 import { Document, isMap, isNode, isScalar, isSeq, type Pair, parseDocument, type ToStringOptions } from "yaml";
 import { z } from "zod";
-import { normalizeTag, normalizeTags, wordsFromName } from "./slug.js";
+import { normalizeTag, normalizeTags, slugify, wordsFromName } from "./slug.js";
 import { DEFAULT_DOC_TYPE, DEFAULT_HEADING, type DocType, isDocType, mediaKindOf, truncate } from "./wiki.js";
 
 export interface DocMeta {
@@ -317,6 +317,10 @@ function readFrontmatter(content: string): Frontmatter | null {
   return { end, sourceStart: first.start, sourceEnd: close.start, source, data };
 }
 
+export function hasValidFrontmatter(content: string): boolean {
+  return readFrontmatter(content) !== null;
+}
+
 function frontmatterEnd(content: string): number {
   return readFrontmatter(content)?.end ?? 0;
 }
@@ -438,6 +442,25 @@ export function headingSlug(text: string): string {
 export function headingAnchors(content: string): HeadingAnchor[] {
   const { headings } = outline(lineTexts(content.slice(frontmatterEnd(content))));
   return withAnchors(headings).map(({ text, level, anchor }) => ({ text, level, anchor }));
+}
+
+export interface HeadingLine extends HeadingAnchor {
+  line: number;
+}
+
+export function headingLines(content: string): HeadingLine[] {
+  const start = frontmatterEnd(content);
+  const offset = start === 0 ? 0 : lineTexts(content.slice(0, start)).length - 1;
+  const { headings } = outline(lineTexts(content.slice(start)));
+  return withAnchors(headings).map(({ text, level, anchor, line }) => ({ text, level, anchor, line: line + offset }));
+}
+
+export function headingLineForAnchor(content: string, anchor: string): number | null {
+  const headings = headingLines(content);
+  const exact = headings.find((heading) => heading.anchor === anchor);
+  if (exact !== undefined) return exact.line;
+  const loose = slugify(anchor);
+  return headings.find((heading) => slugify(heading.text) === loose)?.line ?? null;
 }
 
 export function anchorForHeading(headings: readonly string[], heading: string): string {

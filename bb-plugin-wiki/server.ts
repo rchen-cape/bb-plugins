@@ -3,6 +3,7 @@ import { registerCli } from "./server/cli.js";
 import { createWikiContext, type WikiContext } from "./server/context.js";
 import { registerHttp } from "./server/http.js";
 import { registerMaintenance } from "./server/maintenance.js";
+import { registerMentions } from "./server/mentions.js";
 import { registerRouting } from "./server/routing.js";
 import { registerRpc } from "./server/rpc.js";
 import { registerSchedule } from "./server/schedule.js";
@@ -25,10 +26,16 @@ function registerWatcher(ctx: WikiContext): void {
   });
 }
 
+function registerCommitFlush(ctx: WikiContext): void {
+  ctx.bb.onDispose(() => ctx.vault.closeCommits());
+}
+
 const REGISTRARS: readonly Registrar[] = [
+  registerCommitFlush,
   registerWatcher,
   registerRpc,
   registerTools,
+  registerMentions,
   registerCli,
   registerHttp,
   registerRouting,

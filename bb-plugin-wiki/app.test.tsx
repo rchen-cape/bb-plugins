@@ -1,12 +1,15 @@
 // @vitest-environment jsdom
+import { createElement } from "react";
 import { act, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
+import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadPluginApp, renderSlot, type RpcCall } from "@get-bb/plugin-sdk/testing/app";
+import { loadPluginApp, renderSlot, type RenderedSlot, type RpcCall } from "@get-bb/plugin-sdk/testing/app";
 import type { PluginBrowserBbSdk, PluginCommandContext, PluginMessageActionContext } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import { z } from "zod";
 import { rpcContract, type Card, type CardSource, type Destination, type DocDetail, type DocSummary, type SearchResult, type WikiStatus } from "./contract";
 import { addRequests, searchRequests, type AddRequest } from "./components/requests";
+import { setPreviewFocus } from "./lib/live-preview/index.js";
 
 vi.mock("sonner", () => ({
   toast: Object.assign(vi.fn(), {
@@ -512,31 +515,51 @@ describe("DocView", () => {
     backlinks: [{ slug: "gamma", title: "Gamma process", heading: "Steps" }],
   };
 
-  function renderDoc(rpc: Record<string, (input: unknown) => unknown> = {}) {
-    return load().then((app) =>
-      renderSlot(app.navPanels[0]!, { subPath: "doc/alpha" }, {
+  function renderDoc(rpc: Record<string, (input: unknown) => unknown> = {}, subPath = "doc/alpha") {
+    return load().then((app) => {
+      const slot = renderSlot(app.navPanels[0]!, { subPath }, {
         pluginId: "wiki",
         rpc: { docs: () => DOCS, status: () => STATUS, search: () => NO_RESULTS, doc: () => DETAIL, ...rpc },
-      }),
-    );
+      });
+      return { app, slot };
+    });
   }
 
-  it("renders [[links]] as internal links and navigates on click", async () => {
-    const slot = await renderDoc();
-    const markdown = await slot.findByTestId("bb-markdown");
-    await waitFor(() => expect(markdown.textContent).toContain("[Beta topic › Setup](#wiki/beta#setup)"));
-    expect(markdown.textContent).toContain('<span title="No Wiki doc named “Nowhere” yet">Nowhere</span>');
-    expect(markdown.textContent).not.toContain("title: Alpha project");
+  async function editorIn(slot: RenderedSlot, title = "Alpha project"): Promise<EditorView> {
+    const content = await slot.findByRole("textbox", { name: `Text of ${title}` });
+    const view = EditorView.findFromDOM(content);
+    if (view === null) throw new Error("no editor");
+    return view;
+  }
 
-    const link = document.createElement("a");
-    link.setAttribute("href", "#wiki/beta#setup");
-    link.textContent = "Beta topic";
-    markdown.appendChild(link);
-    fireEvent.click(link);
-    const thread = document.createElement("a");
-    thread.setAttribute("href", "#wiki-thread/thr_9");
-    markdown.appendChild(thread);
-    fireEvent.click(thread);
+  function append(view: EditorView, text: string): void {
+    const end = view.state.doc.length;
+    act(() => {
+      view.dispatch({ changes: { from: end, insert: text }, selection: { anchor: end + text.length }, userEvent: "input.type" });
+    });
+  }
+
+  function click(element: Element): void {
+    fireEvent.mouseDown(element, { button: 0 });
+    fireEvent.mouseUp(element, { button: 0 });
+  }
+
+  async function pressSave(view: EditorView): Promise<void> {
+    await act(async () => {
+      fireEvent.keyDown(view.contentDOM, { key: "s", ctrlKey: true });
+    });
+  }
+
+  it("renders [[links]] and source markers as chips and navigates on click", async () => {
+    const content = `${DETAIL.content}\n<!-- wiki:source thread="thr_9" title="Debug push" added="2026-10-15" -->\nA fact.\n`;
+    const { slot } = await renderDoc({ doc: () => ({ ...DETAIL, content }) });
+    const view = await editorIn(slot);
+    expect(view.contentDOM.textContent).not.toContain("title: Alpha project");
+    expect(view.contentDOM.textContent).not.toContain("[[");
+    expect(slot.getByText("Nowhere").getAttribute("title")).toBe("No Wiki doc named “Nowhere” yet");
+
+    click(slot.getByRole("link", { name: "Beta topic › Setup" }));
+    click(slot.getByRole("link", { name: "“Debug push”" }));
     fireEvent.click(within(slot.getByRole("navigation", { name: "Linked from" })).getByRole("button", { name: /Gamma process/ }));
     expect(slot.inspection.navigateCalls).toEqual([
       { method: "toPluginPanel", path: "wiki", options: { subPath: "doc/beta#setup" } },
@@ -550,88 +573,303 @@ describe("DocView", () => {
     expect(slot.inspection.experimental_clipboardWrites).toEqual([{ text: "[[Alpha project]]" }]);
   });
 
+  it("shows source markers as a small faint label with the date it was added", async () => {
+    const content = `${DETAIL.content}\n<!-- wiki:source notes="Time/oct2026/10-14-26.md" date="2026-10-14" added="2026-10-15" -->\n- first\n`;
+    const { slot } = await renderDoc({ doc: () => ({ ...DETAIL, content }) });
+    await editorIn(slot);
+    const marker = slot.getByText("from 10-14-26 notes");
+    expect(marker.className).toBe("cm-wiki-source");
+    expect(marker.getAttribute("title")).toBe("Added 2026-10-15");
+    expect(marker.closest(".cm-line")?.classList.contains("cm-lp-source-line")).toBe(true);
+  });
+
+  it("autosaves after typing pauses and saves at once on ⌘S, with a quiet status and no toast", async () => {
+    const saves: unknown[] = [];
+    const { slot } = await renderDoc({
+      saveDoc: (input: unknown) => {
+        saves.push(input);
+        return { outcome: "written", sha256: `sha-${saves.length + 1}` };
+      },
+    });
+    const view = await editorIn(slot);
+    append(view, "More.\n");
+    expect(await slot.findByText("· Unsaved changes")).toBeTruthy();
+    await waitFor(() => expect(saves).toHaveLength(1), { timeout: 3000 });
+    expect(saves[0]).toEqual({ slug: "alpha", content: `${DETAIL.content}More.\n`, expectedSha256: "sha-1" });
+    expect(await slot.findByText("· Saved")).toBeTruthy();
+
+    append(view, "Again.\n");
+    await pressSave(view);
+    await waitFor(() => expect(saves).toHaveLength(2));
+    expect(saves[1]).toEqual({ slug: "alpha", content: `${DETAIL.content}More.\nAgain.\n`, expectedSha256: "sha-2" });
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
   it("saves edits and overwrites with the latest on-disk version after a conflict", async () => {
     let disk = "sha-1";
     const saves: unknown[] = [];
-    const slot = await renderDoc({
+    const { slot } = await renderDoc({
       doc: () => ({ ...DETAIL, sha256: disk }),
       saveDoc: (input: unknown) => {
         saves.push(input);
         return saves.length === 1 ? { outcome: "conflict" } : { outcome: "written", sha256: "sha-3" };
       },
     });
-    fireEvent.click(await slot.findByRole("button", { name: "Edit" }));
-    const editor = slot.getByRole("textbox", { name: "Markdown for Alpha project" });
-    fireEvent.change(editor, { target: { value: "# Alpha project\n\nNew text\n" } });
-    await act(async () => {
-      fireEvent.keyDown(editor, { key: "s", metaKey: true });
-    });
+    const view = await editorIn(slot);
+    append(view, "New text\n");
+    await pressSave(view);
     expect(await slot.findByText(/Changed on disk/)).toBeTruthy();
     disk = "sha-2";
     await act(async () => {
       fireEvent.click(slot.getByRole("button", { name: "Overwrite" }));
     });
     await waitFor(() => expect(saves).toHaveLength(2));
+    const content = `${DETAIL.content}New text\n`;
     expect(saves).toEqual([
-      { slug: "alpha", content: "# Alpha project\n\nNew text\n", expectedSha256: "sha-1" },
-      { slug: "alpha", content: "# Alpha project\n\nNew text\n", expectedSha256: "sha-2" },
+      { slug: "alpha", content, expectedSha256: "sha-1" },
+      { slug: "alpha", content, expectedSha256: "sha-2" },
     ]);
-    expect(toast.success).toHaveBeenCalledWith("Saved Alpha project");
+    await waitFor(() => expect(slot.queryByText(/Changed on disk/)).toBeNull());
   });
 
-  function scrollable(markdown: HTMLElement, specs: ReadonlyArray<readonly [string, string]>) {
-    const headings = specs.map(([tag, text]) => {
-      const element = document.createElement(tag);
-      element.textContent = text;
-      const scrolled = vi.fn();
-      element.scrollIntoView = scrolled;
-      return { element, scrolled };
-    });
-    const fragment = document.createDocumentFragment();
-    for (const { element } of headings) fragment.appendChild(element);
-    markdown.appendChild(fragment);
-    return headings;
-  }
-
-  it("scrolls to the copy of a repeated heading that the anchor names", async () => {
-    const content = "---\ntitle: Alpha project\n---\n\n# Alpha project\n\n## Setup\n\nOne.\n\n```\n## Setup\n```\n\n## Setup\n\nTwo.\n";
-    const app = await load();
-    const slot = renderSlot(app.navPanels[0]!, { subPath: "doc/alpha%23setup-1" }, {
-      pluginId: "wiki",
-      rpc: { docs: () => DOCS, status: () => STATUS, search: () => NO_RESULTS, doc: () => ({ ...DETAIL, content }) },
-    });
-    const markdown = await slot.findByTestId("bb-markdown");
-    expect(markdown.textContent).not.toContain("# Alpha project");
-    const headings = scrollable(markdown, [["h2", "Setup"], ["h2", "Setup"]]);
-    await waitFor(() => expect(headings[1]?.scrolled).toHaveBeenCalledWith({ block: "start" }));
-    expect(headings[0]?.scrolled).not.toHaveBeenCalled();
-  });
-
-  it("does not jump back to the anchor when the open doc changes", async () => {
-    let content = "## Intro\n\nOne.\n\n## Setup\n\nTwo.\n";
-    const app = await load();
-    const slot = renderSlot(app.navPanels[0]!, { subPath: "doc/alpha%23setup" }, {
-      pluginId: "wiki",
-      rpc: { docs: () => DOCS, status: () => STATUS, search: () => NO_RESULTS, doc: () => ({ ...DETAIL, content }) },
-    });
-    const markdown = await slot.findByTestId("bb-markdown");
-    const first = scrollable(markdown, [["h2", "Intro"], ["h2", "Setup"]]);
-    await waitFor(() => expect(first[1]?.scrolled).toHaveBeenCalledTimes(1));
-    content = `${content}\nThree.\n`;
+  it("asks before replacing unsaved edits with a change made on disk, and reloads it", async () => {
+    let current = DETAIL;
+    const saveDoc = vi.fn(() => ({ outcome: "written", sha256: "sha-mine" }));
+    const { slot } = await renderDoc({ doc: () => current, saveDoc });
+    const view = await editorIn(slot);
+    append(view, "Mine\n");
+    current = { ...DETAIL, content: `${DETAIL.content}Theirs\n`, sha256: "sha-theirs" };
     await slot.behavior.emitRealtime("wiki-changed", {});
-    await waitFor(() => expect(markdown.textContent).toContain("Three."));
-    const second = scrollable(markdown, [["h2", "Intro"], ["h2", "Setup"]]);
+    expect(await slot.findByText(/Changed on disk/)).toBeTruthy();
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      fireEvent.click(slot.getByRole("button", { name: "Reload" }));
     });
-    expect(first[1]?.scrolled).toHaveBeenCalledTimes(1);
-    expect(second[1]?.scrolled).not.toHaveBeenCalled();
+    await waitFor(() => expect(view.state.doc.toString()).toBe(`${DETAIL.content}Theirs\n`));
+    expect(slot.queryByText(/Changed on disk/)).toBeNull();
+    expect(saveDoc).not.toHaveBeenCalled();
   });
 
-  it("shows the title once and the empty state for a doc that only has its title", async () => {
-    const slot = await renderDoc({ doc: () => ({ ...DETAIL, content: "---\ntitle: Alpha project\ntype: project\naliases: []\n---\n\n# Alpha project\n" }) });
-    expect(await slot.findByText("This doc is empty")).toBeTruthy();
+  it("applies a change made on disk to a clean doc in place, without saving it back", async () => {
+    let current = DETAIL;
+    const saveDoc = vi.fn(() => ({ outcome: "written", sha256: "sha-mine" }));
+    const { slot } = await renderDoc({ doc: () => current, saveDoc });
+    const view = await editorIn(slot);
+    current = { ...DETAIL, content: `${DETAIL.content}Three.\n`, sha256: "sha-2" };
+    await slot.behavior.emitRealtime("wiki-changed", {});
+    await waitFor(() => expect(view.state.doc.toString()).toContain("Three."));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    });
+    expect(saveDoc).not.toHaveBeenCalled();
+    expect(slot.queryByText(/Changed on disk/)).toBeNull();
+  });
+
+  it("applies an outside revert to an earlier version instead of taking it for its own save", async () => {
+    let current = DETAIL;
+    const saves: unknown[] = [];
+    const mine = { ...DETAIL, content: `${DETAIL.content}Mine\n`, sha256: "sha-2" };
+    const { slot } = await renderDoc({
+      doc: () => current,
+      saveDoc: (input: unknown) => {
+        saves.push(input);
+        return { outcome: "written", sha256: "sha-2" };
+      },
+    });
+    const view = await editorIn(slot);
+    append(view, "Mine\n");
+    await pressSave(view);
+    await waitFor(() => expect(saves).toHaveLength(1));
+    expect(await slot.findByText("· Saved")).toBeTruthy();
+    current = mine;
+    await slot.behavior.emitRealtime("wiki-changed", {});
+    current = DETAIL;
+    await slot.behavior.emitRealtime("wiki-changed", {});
+    await waitFor(() => expect(view.state.doc.toString()).toBe(DETAIL.content));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    });
+    expect(saves).toHaveLength(1);
+    expect(slot.queryByText(/Changed on disk/)).toBeNull();
+  });
+
+  it("ignores a read of an earlier version that started before its own save landed", async () => {
+    const replies: DocDetail[] = [];
+    let current = DETAIL;
+    const { slot } = await renderDoc({
+      doc: () => replies.shift() ?? current,
+      saveDoc: () => ({ outcome: "written", sha256: "sha-2" }),
+    });
+    const view = await editorIn(slot);
+    append(view, "Mine\n");
+    await pressSave(view);
+    expect(await slot.findByText("· Saved")).toBeTruthy();
+    current = { ...DETAIL, content: `${DETAIL.content}Mine\n`, sha256: "sha-2" };
+    const before = inputsOf(slot.inspection.rpcCalls, "doc").length;
+    replies.push(DETAIL);
+    await slot.behavior.emitRealtime("wiki-changed", {});
+    await waitFor(() => expect(inputsOf(slot.inspection.rpcCalls, "doc")).toHaveLength(before + 2));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(view.state.doc.toString()).toBe(`${DETAIL.content}Mine\n`);
+    expect(slot.getByText("· Saved")).toBeTruthy();
+  });
+
+  it("deletes a doc whose edits can't be saved, and drops the edits", async () => {
+    const { slot } = await renderDoc({
+      saveDoc: () => ({ outcome: "conflict" }),
+      deleteDoc: () => ({ slug: "alpha", title: "Alpha project" }),
+    });
+    const view = await editorIn(slot);
+    append(view, "Mine\n");
+    await pressSave(view);
+    expect(await slot.findByText(/Changed on disk/)).toBeTruthy();
+    fireEvent.click(slot.getByRole("button", { name: "Delete" }));
+    const dialog = await slot.findByRole("dialog");
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    });
+    await waitFor(() => expect(inputsOf(slot.inspection.rpcCalls, "deleteDoc")).toEqual([{ slug: "alpha" }]));
+    expect(toast.success).toHaveBeenCalledWith("Deleted Alpha project and its unsaved edits");
+    await waitFor(() => expect(slot.queryByRole("textbox", { name: "Text of Alpha project" })).toBeNull());
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("keeps unsaved edits when the file is deleted on disk, and recreates it on overwrite", async () => {
+    let deleted = false;
+    const saves: unknown[] = [];
+    const { slot } = await renderDoc({
+      doc: () => (deleted ? null : DETAIL),
+      saveDoc: (input: unknown) => {
+        saves.push(input);
+        return { outcome: "written", sha256: "sha-new" };
+      },
+    });
+    const view = await editorIn(slot);
+    append(view, "Mine\n");
+    deleted = true;
+    await slot.behavior.emitRealtime("wiki-changed", {});
+    await waitFor(() => expect(inputsOf(slot.inspection.rpcCalls, "doc")).toHaveLength(2));
+    expect(await slot.findByText(/Deleted on disk/)).toBeTruthy();
+    expect(view.state.doc.toString()).toBe(`${DETAIL.content}Mine\n`);
+    await pressSave(view);
+    expect(saves).toEqual([]);
+    await act(async () => {
+      fireEvent.click(slot.getByRole("button", { name: "Overwrite" }));
+    });
+    await waitFor(() => expect(saves).toHaveLength(1));
+    expect(saves).toEqual([{ slug: "alpha", content: `${DETAIL.content}Mine\n`, expectedSha256: null }]);
+    await waitFor(() => expect(slot.queryByText(/Deleted on disk/)).toBeNull());
+  });
+
+  it("shows that a clean doc is gone when its file is deleted on disk", async () => {
+    let deleted = false;
+    const { slot } = await renderDoc({ doc: () => (deleted ? null : DETAIL) });
+    await editorIn(slot);
+    deleted = true;
+    await slot.behavior.emitRealtime("wiki-changed", {});
+    expect(await slot.findByText("This doc isn't in the Wiki")).toBeTruthy();
+    expect(slot.queryByRole("textbox", { name: "Text of Alpha project" })).toBeNull();
+  });
+
+  it("shows the title once and a hint for a doc that only has its title", async () => {
+    const { slot } = await renderDoc({ doc: () => ({ ...DETAIL, content: "---\ntitle: Alpha project\ntype: project\naliases: []\n---\n\n# Alpha project\n" }) });
+    const view = await editorIn(slot);
     expect(slot.getAllByRole("heading", { name: "Alpha project" })).toHaveLength(1);
+    expect(view.contentDOM.textContent).toBe("Start writing…");
+  });
+
+  it("switches to the Markdown source and back", async () => {
+    const { slot } = await renderDoc();
+    const view = await editorIn(slot);
+    const toggle = slot.getByRole("button", { name: "Markdown" });
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    expect(view.contentDOM.textContent).toContain("title: Alpha project");
+    expect(view.contentDOM.textContent).toContain("[[Beta topic#Setup]]");
+    expect(view.dom.classList.contains("cm-wiki-raw")).toBe(true);
+    fireEvent.click(toggle);
+    expect(view.contentDOM.textContent).not.toContain("title: Alpha project");
+    expect(slot.getByRole("link", { name: "Beta topic › Setup" })).toBeTruthy();
+  });
+
+  it("highlights the selection with ⌘⇧H and renders ==text== as a highlight", async () => {
+    const { slot } = await renderDoc({ doc: () => ({ ...DETAIL, content: "# Alpha project\n\nRotate the token monthly.\n" }) });
+    const view = await editorIn(slot);
+    const from = view.state.doc.toString().indexOf("token");
+    act(() => {
+      view.dispatch({ selection: { anchor: from, head: from + "token".length }, effects: setPreviewFocus.of(true) });
+    });
+    await act(async () => {
+      fireEvent.keyDown(view.contentDOM, { key: "H", code: "KeyH", keyCode: 72, ctrlKey: true, shiftKey: true });
+    });
+    expect(view.state.doc.toString()).toBe("# Alpha project\n\nRotate the ==token== monthly.\n");
+    act(() => {
+      view.dispatch({ effects: setPreviewFocus.of(false) });
+    });
+    const highlighted = [...view.contentDOM.querySelectorAll(".cm-lp-highlight")].map((element) => element.textContent).join("");
+    expect(highlighted).toBe("token");
+  });
+
+  it("highlights from the selection toolbar", async () => {
+    const { slot } = await renderDoc({ doc: () => ({ ...DETAIL, content: "# Alpha project\n\nRotate the token monthly.\n" }) });
+    const view = await editorIn(slot);
+    const from = view.state.doc.toString().indexOf("monthly");
+    act(() => {
+      view.dispatch({ selection: { anchor: from, head: from + "monthly".length }, effects: setPreviewFocus.of(true) });
+    });
+    const highlight = view.dom.querySelector('.cm-lp-toolbar button[aria-label="Highlight"]');
+    if (highlight === null) throw new Error("no toolbar");
+    act(() => {
+      fireEvent.mouseDown(highlight);
+      fireEvent.click(highlight);
+    });
+    expect(view.state.doc.toString()).toBe("# Alpha project\n\nRotate the token ==monthly==.\n");
+  });
+
+  it("scrolls the editor to the copy of a repeated heading that the anchor names, once", async () => {
+    const scroll = vi.spyOn(EditorView, "scrollIntoView");
+    try {
+      let content = "---\ntitle: Alpha project\n---\n\n# Alpha project\n\n## Setup\n\nOne.\n\n```\n## Setup\n```\n\n## Setup\n\nTwo.\n\n## Intro\n";
+      const { app, slot } = await renderDoc({ doc: () => ({ ...DETAIL, content, sha256: `sha-${content.length}` }) }, "doc/alpha%23setup-1");
+      const view = await editorIn(slot);
+      await waitFor(() => expect(scroll).toHaveBeenCalledWith(content.indexOf("## Setup\n\nTwo"), { y: "start" }));
+      expect(scroll).toHaveBeenCalledTimes(1);
+
+      content = `${content}\nThree.\n`;
+      await slot.behavior.emitRealtime("wiki-changed", {});
+      await waitFor(() => expect(view.state.doc.toString()).toContain("Three."));
+      expect(scroll).toHaveBeenCalledTimes(1);
+
+      slot.lifecycle.rerender(createElement(app.navPanels[0]!.component, { subPath: "doc/alpha%23intro" }));
+      await waitFor(() => expect(scroll).toHaveBeenCalledTimes(2));
+      expect(scroll).toHaveBeenLastCalledWith(content.indexOf("## Intro"), { y: "start" });
+    } finally {
+      scroll.mockRestore();
+    }
+  });
+
+  it("saves pending edits before renaming the open doc", async () => {
+    const calls: string[] = [];
+    const { slot } = await renderDoc({
+      saveDoc: () => {
+        calls.push("saveDoc");
+        return { outcome: "written", sha256: "sha-2" };
+      },
+      renameDoc: () => {
+        calls.push("renameDoc");
+        return { ...DOCS[0]!, slug: "alpha-two", title: "Alpha two" };
+      },
+    });
+    const view = await editorIn(slot);
+    append(view, "Unsaved\n");
+    fireEvent.click(slot.getByRole("button", { name: "Rename" }));
+    fireEvent.change(await slot.findByRole("textbox", { name: "New title" }), { target: { value: "Alpha two" } });
+    await act(async () => {
+      fireEvent.click(slot.getByRole("button", { name: "Rename" }));
+    });
+    await waitFor(() => expect(calls).toEqual(["saveDoc", "renameDoc"]));
   });
 
   it("opens the doc's file on the server's machine", async () => {
@@ -665,37 +903,6 @@ describe("DocView", () => {
       ]),
     );
     expect(toast.error).not.toHaveBeenCalled();
-  });
-
-  it("keeps unsaved edits when the file is deleted on disk, and recreates it on overwrite", async () => {
-    let deleted = false;
-    const saves: unknown[] = [];
-    const slot = await renderDoc({
-      doc: () => (deleted ? null : DETAIL),
-      saveDoc: (input: unknown) => {
-        saves.push(input);
-        return saves.length === 1 ? { outcome: "conflict" } : { outcome: "written", sha256: "sha-new" };
-      },
-    });
-    fireEvent.click(await slot.findByRole("button", { name: "Edit" }));
-    fireEvent.change(slot.getByRole("textbox", { name: "Markdown for Alpha project" }), { target: { value: "# Alpha project\n\nMine\n" } });
-    deleted = true;
-    await slot.behavior.emitRealtime("wiki-changed", {});
-    await waitFor(() => expect(inputsOf(slot.inspection.rpcCalls, "doc")).toHaveLength(2));
-    const editor = slot.getByRole("textbox", { name: "Markdown for Alpha project" });
-    expect(editor).toHaveProperty("value", "# Alpha project\n\nMine\n");
-    await act(async () => {
-      fireEvent.keyDown(editor, { key: "s", metaKey: true });
-    });
-    const overwrite = await slot.findByRole("button", { name: "Overwrite" });
-    await act(async () => {
-      fireEvent.click(overwrite);
-    });
-    await waitFor(() => expect(saves).toHaveLength(2));
-    expect(saves).toEqual([
-      { slug: "alpha", content: "# Alpha project\n\nMine\n", expectedSha256: "sha-1" },
-      { slug: "alpha", content: "# Alpha project\n\nMine\n", expectedSha256: null },
-    ]);
   });
 });
 

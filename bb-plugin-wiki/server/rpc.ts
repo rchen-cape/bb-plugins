@@ -101,10 +101,11 @@ export async function docDetail(ctx: WikiContext, slug: string): Promise<DocDeta
 export async function saveDoc(ctx: WikiContext, slug: string, content: string, expectedSha256: string | null) {
   const result = await ctx.vault.writeDoc(slug, content, expectedSha256);
   if (result.outcome === "conflict") return result;
-  const title = ctx.store.getDoc(slug)?.title ?? slug;
-  await ctx.vault.commit(`Wiki: edit ${title}`, [docRelPath(slug)]);
-  ctx.publishChanged();
-  return result;
+  if (result.changed) {
+    await ctx.vault.commitSoon(docRelPath(slug), () => `Wiki: edit ${ctx.store.getDoc(slug)?.title ?? slug}`);
+    ctx.publishChanged();
+  }
+  return { outcome: result.outcome, sha256: result.sha256 };
 }
 
 export function assertFreeAliases(store: Store, aliases: readonly string[]): void {

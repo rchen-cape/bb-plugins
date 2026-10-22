@@ -99,7 +99,7 @@ Settings are read on every use, not cached, like Notes does.
   ```
   Docs are sorted by tag. Do not include a timestamp, so the file stays byte-stable.
 - **Writes.** Writes are atomic: write a temp file in the same folder, then rename. Accept and add re-read the file just before writing and apply the append to the latest content. A per-root promise chain serializes all writes.
-- **Git.** When `gitHistory` is on, `git init` runs on first write if `.git` is missing, and every write operation makes one commit. Run git with `execFile` (`git -C root add -A -- <paths>` then `git -C root commit -m <msg> --no-verify`) with a 15 s timeout. Try `git` on PATH, then `/usr/bin/git`, `/opt/homebrew/bin/git`, `/usr/local/bin/git`. Set `-c user.name=Wiki -c user.email=wiki@localhost` only if the repo has no user configured. A git failure is logged and never blocks the write.
+- **Git.** When `gitHistory` is on, `git init` runs on first write if `.git` is missing, and every write operation makes one commit. Editor saves are the exception: the editor saves often, so its saves to one doc share one `Wiki: edit <title>` commit. That commit runs 30 s after the last save, or at most 5 min after the first save not yet committed. It runs sooner when another change to that doc (accept, rename, delete) or any commit that includes the doc runs, and when the plugin shuts down. Run git with `execFile` (`git -C root add -A -- <paths>` then `git -C root commit -m <msg> --no-verify`) with a 15 s timeout. Try `git` on PATH, then `/usr/bin/git`, `/opt/homebrew/bin/git`, `/usr/local/bin/git`. Set `-c user.name=Wiki -c user.email=wiki@localhost` only if the repo has no user configured. A git failure is logged and never blocks the write.
 
 ## 4. Index (SQLite via `bb.storage.database()`, `server/store.ts`)
 
@@ -263,7 +263,7 @@ Only one ingest runs at a time, through a promise lock.
 - `status`: `{ wikiDirectory, notesDirectory, docCount, inboxCount, lastIngestDate|null, routingAgent, gitHistory, tagsFile }`
 - `docs`: `{ type|null }` → `DocSummary[]`, which is `{ slug, title, type, aliases, tag, updatedAt, headings: string[] }`
 - `doc`: `{ slug }` → `{ ...DocSummary, content, sha256, backlinks: {slug,title,heading}[] } | null`
-- `saveDoc`: `{ slug, content, expectedSha256 }` → `{ outcome: "written", sha256 } | { outcome: "conflict" }`. This is the user's own editor save; the user is allowed to rewrite text.
+- `saveDoc`: `{ slug, content, expectedSha256 }` → `{ outcome: "written", sha256 } | { outcome: "conflict" }`. This is the user's own editor save; the user is allowed to rewrite text. The write happens at once; the git commit waits (see **Git**). A save with the same bytes as the file publishes no `wiki-changed`.
 - `createDoc`: `{ title, type, aliases, body }` → `DocSummary`. This is a manual doc; the body is user-written.
 - `search`: `{ query, type|null, limit }` → `{ docs, sections, total }`
 - `suggest`: `{ text, title|null }` → `{ suggestions: { slug, title, type, heading|null, score, reason }[] }`. Local only: FTS over the text's distinctive terms, plus title and tag matches. At most 5. Used by the add dialog, the manual doc dialog and the drop dialog.
@@ -342,15 +342,23 @@ Copy the UI primitives and patterns from Library (`components/ui/*`, `lib/utils.
 - "Run ingest now" sits in a small menu.
 
 **DocView:**
-- Header: title, type badge, aliases chips, "Edit", "Copy link" (copies `[[Title]]`), "Open file" (`navigate.experimental_openFileExternally` if available).
-- The body renders with the SDK `<Markdown content=…/>` after preprocessing:
-  1. `[[X]]` becomes `[label](#wiki/<slug>)`, and unresolved links render as plain text with a dotted underline style.
-  2. Asset paths become `/api/v1/plugins/wiki/http/asset?path=…`, and video embeds become `<video controls>`.
-  3. Source markers become `<sub>from 10-14-26 notes</sub>`, or the thread title.
-- Intercept clicks on `a[href^="#wiki/"]` with a capture-phase listener on the container and navigate internally.
-- Footer: "Linked from" backlinks.
+- Header: title, type badge, alias chips, "Updated …" plus a quiet save status ("Saving…", "Saved", "Unsaved changes", "Couldn't save"), "Copy link" (copies `[[Title]]`), "Open file" (`navigate.experimental_openFileExternally` if available), "Rename", "Delete", and a ghost "Markdown" toggle (`aria-pressed`).
+- Then the conflict banner when needed, then the editor, then the "Linked from" backlinks.
+- **No edit mode.** The body is a live-preview CodeMirror 6 editor (`lib/live-preview/`, shared with Notes). Text looks rendered; a Markdown mark shows only while the selection touches its construct. File bytes are never re-serialized: BOM and line endings round-trip, and untouched text stays byte-for-byte the same. The editor is not its own scroller; the page scrolls (`livePreviewTheme({ scroll: "page" })`).
+- **Wiki rendering** (`components/wiki-editor.ts`, live mode only):
+  1. A `WikiLink` inline parser (before `Link`/`Image`) reads `[[target#heading|label]]` and `![[file|alt]]`. A resolved link is a chip that navigates with `navigate.toPluginPanel(WIKI_PANEL, { subPath: docSubPath(slug, anchor) })`; an unresolved one has a dotted underline and the title "No Wiki doc named “T” yet". With the cursor on it, the raw text shows with link styling.
+  2. `![[x]]`, relative markdown images, and `<video|img src>` lines render through `resolveAssetPath` and `/api/v1/plugins/wiki/http/asset?path=…`.
+  3. Source marker lines become an atomic label ("from 10-14-26 notes", or the thread title, which opens the thread) in `--text-2xs`, a translucent `--subtle-foreground`, brightening to `--muted-foreground` on hover, with "Added <date>" as its title. Typing next to one starts a new line; Backspace or Delete removes it whole.
+  4. The frontmatter, the blank lines after it, and a leading `# Title` line that repeats the doc title are hidden entirely, so the title shows once. Frontmatter the server would not read (YAML that is not a valid mapping) is not hidden: it shows as plain source lines so it can be fixed. `<!-- wiki:unsorted -->` lines are hidden too. A doc with nothing else shows a faint "Start writing…".
+- **Hidden text is protected.** Typing aimed at the hidden head goes onto a new body line, also in a doc that is only a title. A command that edits several places and reaches into hidden text (for example Alt-ArrowUp on the first body line) does nothing. A user edit never removes a hidden `<!-- wiki:unsorted -->` line: Backspace or Delete next to it removes an adjacent blank line instead, or does nothing, and a line with text is never joined onto it. Backspace on an empty line under a source label removes the empty line, not the label.
+- **Markdown toggle.** Swaps the live-preview extensions out through a Compartment, so everything, frontmatter included, shows raw in a monospace font. Per doc view, live by default.
+- **Highlight.** `==text==` renders as a highlight (`color-mix(in oklab, var(--attention) 38%, transparent)`). The selection toolbar's first button and `⌘⇧H` toggle it. Search snippets strip `==`.
+- **Keys.** `⌘S` saves now. Escape blurs the editor when no selection or completion is open. `/` on an empty line opens the block menu. Dropped files go to the page's drop zone, not into the text.
+- **Anchors.** `doc/<slug>#<anchor>` scrolls the editor to that heading once per slug and anchor (`headingLineForAnchor` in `lib/markdown-doc.ts` maps the anchor to a line the way `headingAnchors` numbers them). A refresh does not scroll again; an anchor-only route change does.
 
-**DocEditor.** A textarea editor (monospace) with ⌘S or ⌘Enter to save and Esc to cancel. It saves with `expectedSha256`. On conflict, show the "Changed on disk" banner with Reload and Overwrite (Docs pattern).
+**Autosave** (`components/autosave.ts`, ported from Notes). Each save is a compare-and-swap `saveDoc` against the last sha. It saves 1 s after typing stops and at most 5 s after the first unsaved edit, and on blur, `⌘S`, `pagehide`/`visibilitychange`, leaving the doc, and before Rename, Delete, and Open file. If that save fails, Rename stops with a toast; Delete goes ahead and drops the unsaved edits. Failed saves retry on a backoff. No toast per save; leaving with a failed save toasts "Couldn't save <title>".
+- **Incoming docs.** A doc whose sha is the current base (the last sha written or loaded) is its own echo and is ignored. A sha the editor wrote or loaded earlier may come from a read that started before a save landed, so the editor reads the doc again and ignores it only if that fresh read is the current base. An outside revert to an earlier version is applied like any other change. Otherwise a clean editor applies the change in place (`minimalChange`, no undo entry, no save). With unsaved edits it shows "Changed on disk." with Reload and Overwrite, and autosave pauses. Overwrite re-reads the current sha first.
+- **Deleted on disk.** A clean editor shows "This doc isn't in the Wiki". With unsaved edits the editor stays, with "Deleted on disk." and Overwrite (recreates the file with `expectedSha256: null`) or Discard.
 
 **Inbox and CardView** (the review workflow; fast, keyboard driven):
 - **Card list.** The list shows a source chip (note date, thread, or "From Sketch" / "Upload"), the first line (for an upload card, its first text line, else its name, never the raw image line), tag chips, the rule badge, and the status (`routing` gets a spinner).
@@ -425,7 +433,7 @@ Local embedding search, "Ask the Wiki" with sources, the weekly duplicate check,
 - **Phase A (foundation):** scaffold and config; `lib/wiki.ts`, `lib/slug.ts`, `lib/markdown-doc.ts`, `lib/daily-notes.ts`, `lib/fuzzy.ts` and their tests; `contract.ts`; `server/store.ts`; `server/vault.ts` (fs, index sync, tags.json, git, assets); `server/context.ts` (the shared `WikiContext` type, which bundles bb, settings, store, vault, and `publish` helpers); a minimal `server.ts` that wires settings, store and vault.
 - **Phase B1 (ingest and routing):** `server/cards.ts` (create, route rules, project link rule, update validation, preview, accept, skip), `server/ingest.ts`, `server/routing.ts`, `server/schedule.ts`, and their tests.
 - **Phase B2 (surfaces):** `server/rpc.ts`, `server/tools.ts`, `server/cli.ts`, `server/http.ts`, `server/media.ts` (uploads, messageMedia, asset copy), and `server.ts` final wiring, with tests.
-- **Phase B3 (main UI):** `app.tsx`, `components/WikiPage.tsx`, `components/DocView.tsx`, `components/DocEditor.tsx`, `components/Inbox.tsx`, `components/CardView.tsx`, `components/hooks.ts`, `components/bits.tsx`, `components/requests.ts`, and the app tests.
+- **Phase B3 (main UI):** `app.tsx`, `components/WikiPage.tsx`, `components/DocView.tsx`, `components/use-live-doc.ts`, `components/wiki-editor.ts`, `components/autosave.ts`, `components/Inbox.tsx`, `components/CardView.tsx`, `components/hooks.ts`, `components/bits.tsx`, `components/requests.ts`, and the app tests.
 - **Phase B4 (dialogs):** `components/WikiOverlay.tsx`, `components/AddToWikiDialog.tsx`, `components/QuickSearch.tsx`, `components/NewDocDialog.tsx`, `components/DropZone.tsx` (`useFileDrop`, `uploadFiles`), `components/CodeFence.tsx`, `components/DocPicker.tsx`.
 - **Phase B5:** the Notes change (section 11).
 - **Phase C:** integration, docs (README, PLUGIN_OVERVIEW, SKILL), `plugins.json`, and the README row.

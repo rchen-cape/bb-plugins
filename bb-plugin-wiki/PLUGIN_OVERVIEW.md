@@ -3,7 +3,11 @@ An organized wiki of your projects, topics, and processes, fed by your daily not
 ## What you get
 
 - A **Wiki** page in the sidebar: one Markdown doc per topic, project, process,
-  or service, grouped by type, with fast search and a Markdown editor.
+  or service, grouped by type, with fast search. Edit a doc in place, like
+  Notion: the text looks rendered, saves itself as you type, and a
+  **Markdown** button shows the raw file.
+- **Highlight** text with the selection toolbar's first button or `⌘⇧H`. It
+  writes `==text==` and shows as a marker highlight.
 - A **daily ingest** that reads your past daily notes and turns new lines into
   inbox cards. Tag a block with a line like `@unified-notification`, link a
   line with `[[Doc]]` or `[[Doc#Heading]]`, or leave it out with `@skip`.

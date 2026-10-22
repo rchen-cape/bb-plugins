@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,6 +13,7 @@ import { DESCRIPTION_TOOL, ROUTES_TOOL } from "./server/routing";
 import { statusOf, withoutTitleLine } from "./server/rpc";
 import { createWikiContext, pluginDataDir } from "./server/context";
 import { tagsJson } from "./server/vault";
+import { MENTION_PROVIDER } from "./server/mentions";
 import { ADD_TOOL, GET_TOOL, SEARCH_TOOL } from "./server/tools";
 
 const GLOBAL_TOKEN = ["---", "title: Global token", "type: topic", "aliases: [gt]", "---", "", "# Global token", "", "## Limits", "", "Each tenant gets a token bucket.", ""].join("\n");
@@ -216,6 +218,32 @@ describe("agent tools", () => {
   });
 });
 
+describe("composer mentions", () => {
+  async function wikiMentions() {
+    const { harness } = await setup();
+    const provider = harness.inspection.registrations.mentionProviders.find((entry) => entry.id === MENTION_PROVIDER);
+    if (provider === undefined) throw new Error("no Wiki mention provider");
+    return provider;
+  }
+  const searchFor = (query: string) => ({ trigger: "@" as const, query, projectId: null, threadId: null });
+
+  it("lists matching docs under the @ trigger", async () => {
+    const provider = await wikiMentions();
+    expect(provider).toMatchObject({ label: "Wiki", triggers: ["@"] });
+    expect(await provider.search(searchFor("glob"))).toEqual([{ id: "global-token", title: "Global token", subtitle: "topic · @global-token" }]);
+    expect((await provider.search(searchFor(""))).map((item) => item.id).sort()).toEqual(["global-token", "unified-notification"]);
+  });
+
+  it("resolves a picked doc to its Markdown for the agent", async () => {
+    const provider = await wikiMentions();
+    const { context } = await provider.resolve("global-token");
+    expect(context).toContain("The user attached this Wiki doc");
+    expect(context).toContain('Wiki doc "Global token" (slug global-token');
+    expect(context).toContain("## Limits\n\nEach tenant gets a token bucket.");
+    await expect(provider.resolve("missing-doc")).rejects.toThrow('The Wiki doc "missing-doc" no longer exists.');
+  });
+});
+
 describe("cli", () => {
   it("searches, shows, lists the inbox, and accepts", async () => {
     const { harness, read } = await setup();
@@ -334,14 +362,26 @@ describe("rpc", () => {
   });
 
   it("saves editor changes only against the content the user saw", async () => {
-    const { rpc, read } = await setup();
+    const { rpc, read, harness, wiki } = await setup();
+    const changedSignals = () => harness.inspection.realtimeSignals.filter((signal) => signal.channel === CHANGED_CHANNEL).length;
     const doc = (await rpc("doc", { slug: "global-token" })) as DocDetail;
     const edited = `${doc.content}\nEdited by the user.\n`;
     expect(await rpc("saveDoc", { slug: "global-token", content: edited, expectedSha256: "0".repeat(64) })).toEqual({ outcome: "conflict" });
     expect(await read("global-token.md")).toBe(GLOBAL_TOKEN);
-    const written = (await rpc("saveDoc", { slug: "global-token", content: edited, expectedSha256: doc.sha256 })) as { outcome: string };
+    const before = changedSignals();
+    const written = (await rpc("saveDoc", { slug: "global-token", content: edited, expectedSha256: doc.sha256 })) as { outcome: string; sha256: string };
     expect(written.outcome).toBe("written");
     expect(await read("global-token.md")).toBe(edited);
+    expect(changedSignals()).toBe(before + 1);
+    const again = await rpc("saveDoc", { slug: "global-token", content: edited, expectedSha256: written.sha256 });
+    expect(again).toEqual({ outcome: "written", sha256: written.sha256 });
+    expect(changedSignals()).toBe(before + 1);
+    const renamed = edited.replace("title: Global token", "title: Global token v2");
+    await writeFile(path.join(wiki, "global-token.md"), renamed);
+    const stale = (await rpc("saveDoc", { slug: "global-token", content: renamed, expectedSha256: createHash("sha256").update(renamed).digest("hex") })) as { outcome: string; sha256: string };
+    expect(stale.outcome).toBe("written");
+    expect(changedSignals()).toBe(before + 2);
+    expect(((await rpc("docs", { type: "topic" })) as DocSummary[]).find((summary) => summary.slug === "global-token")?.title).toBe("Global token v2");
   });
 
   it("creates manual docs with the body under the title and a manual marker", async () => {

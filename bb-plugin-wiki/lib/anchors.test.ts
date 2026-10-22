@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { anchorForHeading, headingAnchors, headingSlug, parseDoc, splitSections } from "./markdown-doc";
+import { anchorForHeading, headingAnchors, headingLineForAnchor, headingLines, headingSlug, parseDoc, splitSections } from "./markdown-doc";
 
 const DOC = [
   "---",
@@ -73,5 +73,33 @@ describe("headingSlug", () => {
   it("matches rendered heading text to the raw heading", () => {
     expect(headingSlug(" Setup Push ")).toBe(headingSlug("Setup [[Push]]"));
     expect(headingSlug("Rate limits: burst")).toBe(headingSlug("Rate limits: `burst`"));
+  });
+});
+
+describe("headingLines", () => {
+  it("gives each anchor's line in the whole file, counting the frontmatter", () => {
+    const lines = DOC.split("\n");
+    expect(headingLines(DOC).map(({ anchor, line }) => [anchor, lines[line]])).toEqual([
+      ["runbook", "# Runbook"],
+      ["setup", "## Setup"],
+      ["setup-1", "## Setup"],
+      ["setup-1-1", "## Setup 1"],
+      ["rate-limits-burst--tokens", "### Rate limits: `burst` & [[Global token|tokens]]"],
+      ["setup-2", "## Setup"],
+    ]);
+    expect(headingLines(DOC).map((heading) => heading.line)).toEqual([5, 7, 14, 20, 22, 24]);
+  });
+
+  it("counts lines from the top when there is no frontmatter, also with CRLF and a BOM", () => {
+    expect(headingLines("﻿Intro\r\n\r\n## A\r\n").map((heading) => heading.line)).toEqual([2]);
+    expect(headingLines("# A")).toEqual([{ text: "A", level: 1, anchor: "a", line: 0 }]);
+  });
+});
+
+describe("headingLineForAnchor", () => {
+  it("finds the line of an anchor, falling back to the heading text", () => {
+    expect(headingLineForAnchor(DOC, "setup-2")).toBe(24);
+    expect(headingLineForAnchor(DOC, "Setup")).toBe(7);
+    expect(headingLineForAnchor(DOC, "missing")).toBeNull();
   });
 });

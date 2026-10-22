@@ -329,12 +329,97 @@ function searchableBody(body: string): string {
     .trim();
 }
 
+function isBlank(char: string): boolean {
+  return char === "" || /\s/.test(char);
+}
+
+const LITERAL_INLINE = /(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)|\]\([^)]*\)|<[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*>|(?:\b[A-Za-z][A-Za-z0-9+.-]{1,31}:\/\/|\bwww\.)[^\s<]*/g;
+const FENCE_OPEN = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
+const INDENTED_CODE = /^(?: {4}|\t)/;
+
+function literalRanges(text: string): Array<readonly [number, number]> {
+  return [...text.matchAll(LITERAL_INLINE)].map((match) => [match.index, match.index + match[0].length] as const);
+}
+
+function stripParagraphHighlights(text: string): string {
+  const cuts: number[] = [];
+  const literal = literalRanges(text);
+  let open: number | null = null;
+  for (const match of text.matchAll(/=+/g)) {
+    if (match[0].length !== 2) continue;
+    const at = match.index;
+    if (literal.some(([from, to]) => at < to && at + 2 > from)) continue;
+    const before = text.charAt(at - 1);
+    const after = text.charAt(at + 2);
+    if (open !== null && !isBlank(before)) {
+      cuts.push(open, at);
+      open = null;
+    } else if (!isBlank(after)) {
+      open = at;
+    }
+  }
+  if (cuts.length === 0) return text;
+  let result = "";
+  let from = 0;
+  for (const cut of cuts) {
+    result += text.slice(from, cut);
+    from = cut + 2;
+  }
+  return result + text.slice(from);
+}
+
+function stripProseHighlights(text: string): string {
+  return text
+    .split(/(\n[ \t]*\n)/)
+    .map((part, index) => (index % 2 === 0 ? stripParagraphHighlights(part) : part))
+    .join("");
+}
+
+function codeLines(lines: readonly string[]): boolean[] {
+  const code: boolean[] = [];
+  let fence: string | null = null;
+  let indented = false;
+  lines.forEach((line, index) => {
+    const blank = line.trim() === "";
+    if (fence !== null) {
+      code.push(true);
+      const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line)?.[1];
+      if (close !== undefined && close.charAt(0) === fence.charAt(0) && close.length >= fence.length) fence = null;
+      return;
+    }
+    const open = FENCE_OPEN.exec(line)?.[1];
+    if (open !== undefined) {
+      fence = open;
+      indented = false;
+      code.push(true);
+      return;
+    }
+    const previousBlank = index === 0 || (lines[index - 1] ?? "").trim() === "";
+    indented = INDENTED_CODE.test(line) ? indented || previousBlank : indented && blank;
+    code.push(indented);
+  });
+  return code;
+}
+
+export function stripHighlightDelimiters(text: string): string {
+  const lines = text.split("\n");
+  const code = codeLines(lines);
+  const blocks: Array<{ code: boolean; lines: string[] }> = [];
+  lines.forEach((line, index) => {
+    const isCode = code[index] === true;
+    const last = blocks.at(-1);
+    if (last?.code === isCode) last.lines.push(line);
+    else blocks.push({ code: isCode, lines: [line] });
+  });
+  return blocks.map((block) => (block.code ? block.lines.join("\n") : stripProseHighlights(block.lines.join("\n")))).join("\n");
+}
+
 function cleanSnippet(snippet: string): string {
-  return collapse(stripSourceMarkers(snippet));
+  return collapse(stripHighlightDelimiters(stripSourceMarkers(snippet)));
 }
 
 function excerptOf(body: string): string {
-  return truncate(collapse(stripSourceMarkers(body)), LIMITS.excerpt);
+  return truncate(collapse(stripHighlightDelimiters(stripSourceMarkers(body))), LIMITS.excerpt);
 }
 
 function randomId(prefix: string): string {
