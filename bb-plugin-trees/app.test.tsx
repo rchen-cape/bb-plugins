@@ -119,6 +119,7 @@ function baseRpc(overrides: Record<string, (input: never) => unknown> = {}) {
       prompt: "# Generate API design specs\n\n## Task\n\nGenerate it.",
       sourceTitles: ["Write auth requirements"],
     }),
+    wiki_docs: () => ({ docs: [] }),
     ...overrides,
   };
 }
@@ -988,6 +989,108 @@ describe("Project Trees panel", () => {
       },
       { timeout: 3000 },
     );
+  });
+
+  describe("@ Wiki docs", () => {
+    const wikiDocs = [
+      {
+        slug: "global-token",
+        title: "Global token",
+        type: "topic",
+        tag: "global-token",
+        aliases: ["gt"],
+      },
+      {
+        slug: "retry-policy",
+        title: "Retry policy",
+        type: "process",
+        tag: "retries",
+        aliases: [],
+      },
+    ];
+
+    it("links a picked Wiki doc into a note at the caret", async () => {
+      const writes: string[] = [];
+      const slot = renderSlot(
+        panel,
+        { subPath: `${project.id}/${requirements.id}` },
+        {
+          rpc: baseRpc({
+            wiki_docs: () => ({ docs: wikiDocs }),
+            artifact_write: (input: { content: string }) => {
+              writes.push(input.content);
+              return { sha256: "def" };
+            },
+          }),
+        },
+      );
+      const document = await slot.findByRole("combobox", {
+        name: "Task document",
+      });
+
+      fireEvent.change(document, { target: { value: "# Notes\n\nSee @glo" } });
+      const menu = await slot.findByRole("listbox", { name: "Wiki docs" });
+      expect(
+        within(menu)
+          .getAllByRole("option")
+          .map((option) => option.textContent),
+      ).toEqual(["Global tokentopic · global-token"]);
+
+      fireEvent.keyDown(document, { key: "Enter" });
+      expect((document as HTMLTextAreaElement).value).toBe(
+        "# Notes\n\nSee [[global-token]] ",
+      );
+      expect(slot.queryByRole("listbox")).toBeNull();
+      await waitFor(
+        () => {
+          expect(writes.at(-1)).toBe("# Notes\n\nSee [[global-token]] ");
+        },
+        { timeout: 3000 },
+      );
+    });
+
+    it("keeps the menu shut after Escape until that @ is gone", async () => {
+      const slot = renderSlot(
+        panel,
+        { subPath: `${project.id}/${specs.id}` },
+        {
+          rpc: baseRpc({
+            wiki_docs: () => ({ docs: wikiDocs }),
+            graph_get: () => ({
+              project,
+              nodes: [
+                requirements,
+                {
+                  ...specs,
+                  state: "ready",
+                  workspace: { kind: "project", projectId: "proj_api" },
+                },
+              ],
+            }),
+            base_branches: () => ({ branches: ["main"], defaultBranch: "main" }),
+          }),
+        },
+      );
+      const instruction = await slot.findByRole("combobox", {
+        name: "Task instruction",
+      });
+
+      fireEvent.change(instruction, { target: { value: "Use @" } });
+      await slot.findByRole("listbox", { name: "Wiki docs" });
+      fireEvent.keyDown(instruction, { key: "Escape" });
+      expect(slot.queryByRole("listbox")).toBeNull();
+
+      fireEvent.change(instruction, { target: { value: "Use @r" } });
+      expect(slot.queryByRole("listbox")).toBeNull();
+      fireEvent.change(instruction, { target: { value: "Use " } });
+      fireEvent.change(instruction, { target: { value: "Use @" } });
+      await slot.findByRole("listbox", { name: "Wiki docs" });
+      fireEvent.keyDown(instruction, { key: "ArrowDown" });
+      fireEvent.keyDown(instruction, { key: "Tab" });
+      expect((instruction as HTMLTextAreaElement).value).toBe(
+        "Use [[retry-policy]] ",
+      );
+    });
   });
 
   /*

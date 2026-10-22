@@ -53,6 +53,8 @@ interface Fakes {
   archived: string[];
   stopped: string[];
   summaryFailure: string | null;
+  /** Docs the fake Wiki plugin holds; null when the Wiki is not installed. */
+  wikiDocs: Map<string, { title: string; content: string }> | null;
 }
 
 function digest(content: string): string {
@@ -93,6 +95,7 @@ function makeFakes(): Fakes {
     archived: [],
     stopped: [],
     summaryFailure: null,
+    wikiDocs: null,
   };
 }
 
@@ -102,6 +105,30 @@ function buildSdk(fakes: Fakes) {
   return {
     hosts: {
       list: async () => [{ id: "host_1", connected: true, name: "primary" }],
+    },
+    plugins: {
+      callRpc: async (args: {
+        pluginId: string;
+        method: string;
+        input?: unknown;
+      }) => {
+        const docs = fakes.wikiDocs;
+        if (args.pluginId !== "wiki" || docs === null) {
+          throw new Error(`plugin ${args.pluginId} is not running`);
+        }
+        if (args.method === "docs") {
+          return [...docs].map(([slug, doc]) => ({
+            slug,
+            title: doc.title,
+            type: "topic",
+            tag: slug,
+            aliases: [],
+          }));
+        }
+        const { slug } = args.input as { slug: string };
+        const doc = docs.get(slug);
+        return doc === undefined ? null : { slug, ...doc };
+      },
     },
     environments: {
       get: async ({ environmentId }: { environmentId: string }) => {
@@ -1089,6 +1116,123 @@ describe("trees service", () => {
     })) as unknown as { prompt: string };
     expect(preview.prompt).toContain("Exact wording that must survive.");
     expect(preview.prompt).toContain("full output");
+  });
+
+  describe("Wiki links", () => {
+    const WIKI_DOC = "# Global token\n\nRefill is 10 tokens per second.\n";
+
+    beforeEach(() => {
+      fakes.wikiDocs = new Map([
+        ["global-token", { title: "Global token", content: WIKI_DOC }],
+      ]);
+    });
+
+    it("hands a note's linked Wiki docs down after its whole document", async () => {
+      const { call } = await loadPlugin(fakes);
+      const project = await createProject(call, "Auth");
+      const note = await createNode(call, {
+        projectId: project.id,
+        title: "Research",
+        kind: "markdown",
+        handoff: "full",
+      });
+      const child = await createNode(call, {
+        projectId: project.id,
+        title: "Spec",
+        kind: "agent",
+        dependsOn: [note.id],
+      });
+      fakes.files.set(
+        note.artifactPath,
+        "Rate limits follow [[global-token]]. [[missing-doc]] stays as text.",
+      );
+      await call("node_complete", { nodeId: note.id, awaitSummary: true });
+
+      const { prompt } = (await call("context_preview", {
+        nodeId: child.id,
+      })) as unknown as { prompt: string };
+      expect(prompt).toContain("[[missing-doc]] stays as text.");
+      expect(prompt).toContain(
+        "#### Wiki doc: Global token (global-token.md)\n\n# Global token\n\nRefill is 10 tokens per second.",
+      );
+      expect(prompt.indexOf("Rate limits follow")).toBeLessThan(
+        prompt.indexOf("#### Wiki doc"),
+      );
+    });
+
+    it("summarizes a note together with the Wiki docs it links to", async () => {
+      const { call } = await loadPlugin(fakes);
+      const project = await createProject(call, "Auth");
+      const note = await createNode(call, {
+        projectId: project.id,
+        title: "Research",
+        kind: "markdown",
+      });
+      fakes.files.set(note.artifactPath, "Follow [[Global token]].");
+      await call("node_complete", { nodeId: note.id, awaitSummary: true });
+
+      const worker = fakes.spawns.at(-1);
+      expect(worker?.visibility).toBe("hidden");
+      expect(worker?.prompt).toContain("Follow [[Global token]].");
+      expect(worker?.prompt).toContain("Refill is 10 tokens per second.");
+    });
+
+    it("attaches the Wiki docs an agent task's instruction links to", async () => {
+      const { call } = await loadPlugin(fakes);
+      const project = await createProject(call, "Auth");
+      const task = await createNode(call, {
+        projectId: project.id,
+        title: "Build limiter",
+        kind: "agent",
+        instruction: "Implement [[global-token]] limits.",
+      });
+      await call("node_start", { nodeId: task.id });
+
+      const spawn = fakes.spawns.at(-1);
+      expect(spawn?.prompt).toContain("Implement [[global-token]] limits.");
+      expect(spawn?.prompt).toContain(
+        "attached as Markdown files: global-token.md ([[global-token]])",
+      );
+      expect(spawn?.prompt).not.toContain("Refill is 10 tokens per second.");
+      expect(spawn?.input.at(-1)).toMatchObject({
+        type: "localFile",
+        path: "attachments/proj_personal/global-token.md",
+        name: "global-token.md",
+        mimeType: "text/markdown",
+      });
+      expect(fakes.uploads.at(-1)).toEqual({
+        projectId: "proj_personal",
+        filename: "global-token.md",
+        bytes: Buffer.byteLength(WIKI_DOC),
+      });
+    });
+
+    it("lists the Wiki's docs for the @ menu, and none without a Wiki", async () => {
+      const { call } = await loadPlugin(fakes);
+      expect(await call("wiki_docs", null)).toEqual({
+        docs: [
+          {
+            slug: "global-token",
+            title: "Global token",
+            type: "topic",
+            tag: "global-token",
+            aliases: [],
+          },
+        ],
+      });
+
+      fakes.wikiDocs = null;
+      expect(await call("wiki_docs", null)).toEqual({ docs: [] });
+      const project = await createProject(call, "Auth");
+      const task = await createNode(call, {
+        projectId: project.id,
+        title: "Build limiter",
+        kind: "agent",
+        instruction: "Implement [[global-token]] limits.",
+      });
+      await call("node_start", { nodeId: task.id });
+      expect(fakes.spawns.at(-1)?.input).toHaveLength(1);
+    });
   });
 
   /*

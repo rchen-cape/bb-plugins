@@ -74,6 +74,15 @@ import {
   imageMimeType,
   withImageMarkers,
 } from "./images.js";
+import { createWikiDocs, type WikiDocs } from "./wiki.js";
+import {
+  attachedWikiDocsNote,
+  linkedWikiRefs,
+  wikiDocFileName,
+  withWikiDocs,
+  type LinkedWikiDoc,
+  type WikiDocRef,
+} from "./wiki-links.js";
 
 type PromptInput = Parameters<
   BbPluginApi["sdk"]["threads"]["send"]
@@ -162,6 +171,8 @@ export interface TreeServiceDeps {
   db: Db;
   resolveRootDirectory: () => Promise<string>;
   revealDirectory: (path: string) => Promise<void>;
+  /** Defaults to the Wiki plugin, read over its RPC. */
+  wiki?: WikiDocs;
 }
 
 export interface CreateNodeArgs {
@@ -205,6 +216,14 @@ export interface ContextPreview {
    * the model is shown the picture rather than told a path.
    */
   imagePaths: string[];
+}
+
+/*
+ * The context plus the Wiki docs an agent task's instruction links to, which
+ * go with the prompt as attached files. Only the prompt is shown in the panel.
+ */
+interface PreparedContext extends ContextPreview {
+  wikiDocs: LinkedWikiDoc[];
 }
 
 export interface AttachedImage {
@@ -314,6 +333,8 @@ export interface TreeService {
     expectedSha256: string | null;
   }): Promise<{ sha256: string }>;
   previewContext(args: { nodeId: string }): Promise<ContextPreview>;
+  /** The Wiki docs the @ menu offers; empty when the Wiki is unavailable. */
+  wikiDocs(): Promise<WikiDocRef[]>;
   attachImage(args: {
     nodeId: string;
     fileName: string;
@@ -378,6 +399,7 @@ function boundedText(
 
 export function createTreeService(deps: TreeServiceDeps): TreeService {
   const { bb, db } = deps;
+  const wiki = deps.wiki ?? createWikiDocs(bb);
 
   function toGraphNode(node: NodeRow): GraphNode {
     return {
@@ -671,6 +693,26 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
     return output ?? "";
   }
 
+  /*
+   * The Wiki docs a text links to, read now so a task gets each doc as it is
+   * when the context goes down. A link the Wiki cannot resolve stays as text.
+   */
+  async function linkedWikiDocs(text: string): Promise<LinkedWikiDoc[]> {
+    if (!text.includes("[[")) return [];
+    const docs = await wiki.list();
+    if (docs === null) return [];
+    const linked: LinkedWikiDoc[] = [];
+    for (const ref of linkedWikiRefs(docs, text)) {
+      const doc = await wiki.read(ref.slug);
+      if (doc !== null) linked.push(doc);
+    }
+    return linked;
+  }
+
+  async function withLinkedWikiDocs(text: string): Promise<string> {
+    return withWikiDocs(text, await linkedWikiDocs(text));
+  }
+
   function readArtifactContent(
     node: NodeRow,
     project: ProjectRow,
@@ -751,11 +793,14 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
       );
     }
     return (
-      await summarizeWithWorker({ node, artifact: artifact.content })
+      await summarizeWithWorker({
+        node,
+        artifact: await withLinkedWikiDocs(artifact.content),
+      })
     ).trim();
   }
 
-  async function buildContextPreview(node: NodeRow): Promise<ContextPreview> {
+  async function buildContextPreview(node: NodeRow): Promise<PreparedContext> {
     const project = requireProject(node.projectId);
     const graph = graphOf(node.projectId);
     const rows = new Map(
@@ -789,7 +834,10 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
         title: source.title,
         artifactFile: source.artifactFile,
         summary: source.summary,
-        artifact: marked.text,
+        artifact:
+          source.kind === "markdown"
+            ? await withLinkedWikiDocs(marked.text)
+            : marked.text,
         handoff: source.handoff,
         images: marked.images.map((image) => ({
           name: image.alt,
@@ -801,20 +849,27 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
         })),
       });
     }
+    const prompt = assembleContext({
+      nodeTitle: node.title,
+      nodeKind: node.kind,
+      artifactFile: node.artifactFile,
+      mode: node.contextMode,
+      customBrief: node.customBrief,
+      instruction: node.instruction,
+      sources,
+    });
+    const wikiDocs =
+      node.kind === "agent" ? await linkedWikiDocs(node.instruction) : [];
     return {
-      prompt: assembleContext({
-        nodeTitle: node.title,
-        nodeKind: node.kind,
-        artifactFile: node.artifactFile,
-        mode: node.contextMode,
-        customBrief: node.customBrief,
-        instruction: node.instruction,
-        sources,
-      }),
+      prompt:
+        wikiDocs.length === 0
+          ? prompt
+          : `${prompt}\n${attachedWikiDocsNote(wikiDocs)}\n`,
       sourceTitles: sources.map((source) => source.title),
       imagePaths: sources.flatMap((source) =>
         source.images.map((image) => image.absolutePath),
       ),
+      wikiDocs,
     };
   }
 
@@ -849,7 +904,7 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
    * picture silently never arrives. An attachment is bytes bb already holds.
    */
   async function promptInput(args: {
-    preview: ContextPreview;
+    preview: PreparedContext;
     projectId: string;
   }): Promise<PromptInput[]> {
     const parts: PromptInput[] = [
@@ -858,7 +913,38 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
     for (const path of args.preview.imagePaths) {
       parts.push(await attachImageToProject(args.projectId, path));
     }
+    for (const doc of args.preview.wikiDocs) {
+      parts.push(await attachWikiDocToProject(args.projectId, doc));
+    }
     return parts;
+  }
+
+  // Uploaded like an image, for the same reason: bb holds the bytes itself.
+  async function attachWikiDocToProject(
+    projectId: string,
+    doc: LinkedWikiDoc,
+  ): Promise<PromptInput> {
+    const name = wikiDocFileName(doc.slug);
+    const bytes = new Uint8Array(Buffer.from(doc.content, "utf8"));
+    try {
+      const uploaded = await bb.sdk.projects.attachments.upload({
+        projectId,
+        clientFile: bytes,
+        filename: name,
+        mimeType: "text/markdown",
+      });
+      return {
+        type: "localFile",
+        path: uploaded.path,
+        name,
+        mimeType: "text/markdown",
+        sizeBytes: bytes.byteLength,
+      };
+    } catch (error) {
+      throw new TreeError(
+        `The Wiki doc ${name} could not be attached: ${errorText(error)}`,
+      );
+    }
   }
 
   async function attachImageToProject(
@@ -1390,7 +1476,14 @@ export function createTreeService(deps: TreeServiceDeps): TreeService {
     },
 
     async previewContext(args) {
-      return await buildContextPreview(requireNode(args.nodeId));
+      const { prompt, sourceTitles, imagePaths } = await buildContextPreview(
+        requireNode(args.nodeId),
+      );
+      return { prompt, sourceTitles, imagePaths };
+    },
+
+    async wikiDocs() {
+      return (await wiki.list()) ?? [];
     },
 
     /*

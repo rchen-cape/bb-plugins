@@ -465,6 +465,11 @@ function TreesPanel({ subPath }: PluginNavPanelProps) {
   const workspaceQuery = useTreesQuery("workspaces", (client) =>
     client.call("workspace_options"),
   );
+  // Read again for each task opened, so a doc added to the Wiki shows up.
+  const wikiDocsQuery = useTreesQuery(
+    selectedNodeId === null ? null : `wiki-docs:${selectedNodeId}`,
+    (client) => client.call("wiki_docs").then((result) => result.docs),
+  );
   /*
    * A short-lived URL the app can load this tree's images from. It expires,
    * which is why it is a query that reloads with the tree rather than
@@ -797,6 +802,7 @@ function TreesPanel({ subPath }: PluginNavPanelProps) {
               artifact={artifact}
               assetsBaseUrl={assetsQuery.data?.baseUrl ?? null}
               contextPreview={contextPreview}
+              wikiDocs={wikiDocsQuery.data ?? []}
               busyAction={busyAction}
               onClose={() => selectNode(null)}
               onUpdate={updateNode}

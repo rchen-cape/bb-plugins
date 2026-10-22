@@ -25,6 +25,8 @@ import { nextAutosaveDelayMs } from "./autosave";
 import { ImageDropZone, NoteImageStrip, fileToBase64 } from "./note-images";
 import { StateMenu, type StateOption } from "./state-menu";
 import { KIND_LABELS, kindChipClass, stateChipClass } from "./node-visuals";
+import type { WikiDocRef } from "../src/wiki-links";
+import { WikiMentionTextarea } from "./wiki-mention-textarea";
 
 export interface NodeUpdatePatch {
   title?: string;
@@ -60,6 +62,8 @@ export interface NodeDetailProps {
   /** Where the panel can load this tree's images from; a lease, or nothing. */
   assetsBaseUrl: string | null;
   contextPreview: string | null;
+  /** Wiki docs the @ menu in the note and the instruction offers. */
+  wikiDocs: readonly WikiDocRef[];
   handDown: readonly HandDownDelivery[] | null;
   busyAction: string | null;
   onUpdate: (patch: NodeUpdatePatch) => void;
@@ -342,6 +346,7 @@ function AgentStart({
   onCreateThread,
   instruction,
   onInstructionChange,
+  wikiDocs,
   onInstructionCommit,
 }: {
   bbProjects: readonly { id: string; name: string }[];
@@ -355,6 +360,7 @@ function AgentStart({
   onCreateThread: (args: { baseBranch: string; prompt: string }) => void;
   instruction: string;
   onInstructionChange: (value: string) => void;
+  wikiDocs: readonly WikiDocRef[];
   onInstructionCommit: () => void;
 }) {
   const [branch, setBranch] = useState("");
@@ -405,12 +411,14 @@ function AgentStart({
           {branchProblem}
         </p>
       ) : null}
-      <Textarea
+      <WikiMentionTextarea
         aria-label="Task instruction"
-        placeholder="What should this task do?"
+        placeholder="What should this task do? Type @ to attach a Wiki doc."
+        wrapperClassName="flex min-h-24 flex-1 flex-col"
         className="min-h-24 flex-1 resize-none py-0 text-sm rounded-none border-0 bg-transparent px-0 shadow-none focus-visible:ring-0"
         value={instruction}
-        onChange={(event) => onInstructionChange(event.target.value)}
+        wikiDocs={wikiDocs}
+        onValueChange={onInstructionChange}
         onBlur={onInstructionCommit}
       />
       <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2">
@@ -731,6 +739,7 @@ export function NodeDetail(props: NodeDetailProps) {
             onCreateThread={props.onCreateThread}
             instruction={instruction}
             onInstructionChange={setInstruction}
+            wikiDocs={props.wikiDocs}
             onInstructionCommit={() => {
               if (instruction !== node.instruction) {
                 props.onUpdate({ instruction });
@@ -776,14 +785,16 @@ export function NodeDetail(props: NodeDetailProps) {
                 disabled={documentDisabled}
                 onDropImages={attachImages}
               >
-                <Textarea
+                <WikiMentionTextarea
                   ref={documentRef}
                   aria-label="Task document"
-                  placeholder="Write the note here, or drop an image into it."
+                  placeholder="Write the note here, or drop an image into it. Type @ to link a Wiki doc."
+                  wrapperClassName="flex min-h-32 flex-1 flex-col"
                   className="min-h-32 flex-1 resize-none py-0 font-mono text-sm rounded-none border-0 bg-transparent px-0 shadow-none focus-visible:ring-0"
                   value={artifactContent}
+                  wikiDocs={props.wikiDocs}
                   disabled={documentDisabled}
-                  onChange={(event) => queueArtifactSave(event.target.value)}
+                  onValueChange={queueArtifactSave}
                   onBlur={flushArtifactSave}
                 />
               </ImageDropZone>

@@ -255,6 +255,24 @@ export const treesRpcContract = defineRpcContract({
     input: nodeTargetSchema,
     output: nodeResultSchema,
   },
+  wiki_docs: {
+    input: z.null(),
+    output: z
+      .object({
+        docs: z.array(
+          z
+            .object({
+              slug: z.string(),
+              title: z.string(),
+              type: z.string(),
+              tag: z.string(),
+              aliases: z.array(z.string()),
+            })
+            .strict(),
+        ),
+      })
+      .strict(),
+  },
   workspace_options: {
     input: z.null(),
     output: z
@@ -341,6 +359,7 @@ export function createRpcHandlers(args: {
     node_reopen: (input) => ({ node: service.reopenNode(input) }),
     node_mark_working: (input) => ({ node: service.markWorking(input) }),
     node_acknowledge: (input) => ({ node: service.acknowledgeStale(input) }),
+    wiki_docs: async () => ({ docs: await service.wikiDocs() }),
     workspace_options: async () => ({
       projects: await args.listBbProjects(),
       environments: await args.listSharedEnvironments(),
